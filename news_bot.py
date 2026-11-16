@@ -2,6 +2,10 @@ import os
 import time
 import html
 import re
+import urllib.parse
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+from datetime import timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
@@ -31,6 +35,7 @@ def clean_text(raw_text):
         return ""
     text = re.sub(r"<[^>]+>", "", raw_text)
     text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return text.strip()
 
@@ -54,7 +59,7 @@ def save_sent_link(link):
     except Exception as e:
         print(f"⚠️ 링크 저장 오류: {e}")
 
-# 네이버 뉴스 크롤링
+# 1. 네이버 뉴스 크롤링
 def fetch_naver_news(keyword):
     url = "https://search.naver.com/search.naver"
     params = {"where": "news", "query": keyword, "sort": "1"}
@@ -93,7 +98,7 @@ def fetch_naver_news(keyword):
         print(f"[네이버 크롤링 오류] {e}")
     return news_list
 
-# 다음 뉴스 크롤링
+# 2. 다음 뉴스 크롤링
 def fetch_daum_news(keyword):
     url = "https://search.daum.net/search"
     params = {"w": "news", "q": keyword, "sort": "recency"}
@@ -123,6 +128,77 @@ def fetch_daum_news(keyword):
                 news_list.append({"portal": "다음 뉴스", "press": press, "pub_date": pub_date, "title": title, "summary": desc, "link": link})
     except Exception as e:
         print(f"[다음 크롤링 오류] {e}")
+    return news_list
+
+# 3. 구글 뉴스 RSS 크롤링 (포털 비제휴 전문지·지역지 수집용)
+def fetch_google_news(keyword):
+    # 최근 7일 이내(when:7d) 기사를 검색하여 최신순 정렬
+    encoded_kw = urllib.parse.quote(f"{keyword} when:7d")
+    url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
+    news_list = []
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall(".//item")
+            
+            # 발행일시(pubDate) 기준 최신순 정렬
+            def parse_pub_date(item):
+                pub_el = item.find("pubDate")
+                if pub_el is not None and pub_el.text:
+                    try:
+                        return parsedate_to_datetime(pub_el.text)
+                    except Exception:
+                        pass
+                return parsedate_to_datetime("Thu, 01 Jan 1970 00:00:00 GMT")
+
+            sorted_items = sorted(items, key=parse_pub_date, reverse=True)[:10]
+            kst = timezone(timedelta(hours=9))
+
+            for item in sorted_items:
+                raw_title = item.findtext("title", "")
+                link = item.findtext("link", "")
+                if not raw_title or not link:
+                    continue
+
+                source_el = item.find("source")
+                press = clean_text(source_el.text) if (source_el is not None and source_el.text) else "구글 뉴스"
+
+                # 제목 끝에 붙는 ' - 언론사명' 제거
+                if " - " in raw_title:
+                    raw_title_main, tail_press = raw_title.rsplit(" - ", 1)
+                    if press == "구글 뉴스":
+                        press = clean_text(tail_press)
+                else:
+                    raw_title_main = raw_title
+
+                title = clean_text(raw_title_main)
+
+                # 발행일시 한국 시간(KST) 변환
+                pub_date_raw = item.findtext("pubDate", "")
+                pub_date = "최근"
+                if pub_date_raw:
+                    try:
+                        dt = parsedate_to_datetime(pub_date_raw).astimezone(kst)
+                        pub_date = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        pub_date = "최근"
+
+                desc_raw = item.findtext("description", "")
+                desc = clean_text(desc_raw) if desc_raw else title
+                if not desc or desc == press:
+                    desc = title
+
+                news_list.append({
+                    "portal": "구글 뉴스",
+                    "press": press,
+                    "pub_date": pub_date,
+                    "title": title,
+                    "summary": desc,
+                    "link": link
+                })
+    except Exception as e:
+        print(f"[구글 크롤링 오류] {e}")
     return news_list
 
 def analyze_sentiment(title, summary):
@@ -192,6 +268,10 @@ def save_to_excel(article, sentiment):
         print(f"[엑셀 저장 오류] {e}")
 
 def send_telegram_alert(article, sentiment):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ 텔레그램 토큰 또는 채팅방 ID가 설정되지 않아 알림을 건너뜁니다.")
+        return False
+
     portal = article["portal"]
     press = article["press"]
     pub_date = article["pub_date"]
@@ -199,7 +279,6 @@ def send_telegram_alert(article, sentiment):
     summary = article["summary"]
     link = article["link"]
     
-    # 💡 논조(sentiment)에 따른 아이콘 및 헤더 설정
     if "긍정" in sentiment:
         status_header = "🟢 긍정 (우호적 보도)"
     elif "부정" in sentiment:
@@ -218,35 +297,48 @@ def send_telegram_alert(article, sentiment):
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": False}
-    res = requests.post(url, json=payload, timeout=10)
-    return res.status_code == 200
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        return res.status_code == 200
+    except Exception as e:
+        print(f"[텔레그램 전송 오류] {e}")
+        return False
 
 # [메인 실행 함수] 무한 루프 없이 한 번 실행되고 종료됨 (GitHub Actions 전용)
 def main():
     print(f"🚀 [{KEYWORD}] 1회성 뉴스 클리핑 및 전송을 시작합니다...")
     sent_links = load_sent_links()
+    seen_titles = set()
     
     naver_articles = fetch_naver_news(KEYWORD)
     daum_articles = fetch_daum_news(KEYWORD)
-    all_articles = naver_articles + daum_articles
+    google_articles = fetch_google_news(KEYWORD)
+    
+    all_articles = naver_articles + daum_articles + google_articles
     new_count = 0
     
     for article in reversed(all_articles):
         link = article["link"]
-        if link not in sent_links:
+        title = article["title"]
+        
+        # 이미 보낸 링크이거나, 이번 회차에서 동일 제목 기사를 처리했다면 건너뜀
+        if link not in sent_links and title not in seen_titles:
             sent_links.add(link)
+            seen_titles.add(title)
             save_sent_link(link)
             
-            sentiment = analyze_sentiment(article["title"], article["summary"])
+            sentiment = analyze_sentiment(title, article["summary"])
             save_to_excel(article, sentiment)
             
             success = send_telegram_alert(article, sentiment)
             if success:
                 new_count += 1
-                print(f"✅ [전송 완료] {article['title']}")
+                print(f"✅ [전송 완료] ({article['portal']}) {title}")
+            else:
+                print(f"📝 [대장 기록 완료 / 텔레그램 미전송] ({article['portal']}) {title}")
             time.sleep(1)
             
-    print(f"✨ 작업 완료! 신규 기사 {new_count}건 처리 후 정상 종료합니다.")
+    print(f"✨ 작업 완료! 신규 기사 {new_count}건 알림 전송 후 정상 종료합니다.")
 
 if __name__ == "__main__":
     main()
