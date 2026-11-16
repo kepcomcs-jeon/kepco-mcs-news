@@ -132,8 +132,8 @@ def fetch_daum_news(keyword):
 
 # 3. 구글 뉴스 RSS 크롤링 (포털 비제휴 전문지·지역지 수집용)
 def fetch_google_news(keyword):
-    # 최근 7일 이내(when:7d) 기사를 검색하여 최신순 정렬
-    encoded_kw = urllib.parse.quote(f"{keyword} when:7d")
+    # 최근 1일 이내(when:1d) 기사를 검색하여 최신순 정렬
+    encoded_kw = urllib.parse.quote(f"{keyword} when:1d")
     url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
     news_list = []
     try:
