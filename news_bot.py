@@ -187,19 +187,20 @@ def fetch_google_news(keyword):
 
                 desc_raw = item.findtext("description", "")
                 desc = clean_text(desc_raw) if desc_raw else title
-                if not desc or desc == press:
-                    desc = title
 
-                news_list.append({
-                    "portal": "구글 뉴스",
-                    "press": press,
-                    "pub_date": pub_date,
-                    "title": title,
-                    "summary": desc,
-                    "link": link
-                })
+                # 💡 2차 검증: 제목이나 요약 내용에 키워드가 진짜로 들어있을 때만 추가
+                if keyword in title or keyword in desc:
+                    news_list.append({
+                        "portal": "구글 뉴스",
+                        "press": press,
+                        "pub_date": pub_date,
+                        "title": title,
+                        "summary": desc,
+                        "link": link
+                    })
     except Exception as e:
         print(f"[구글 크롤링 오류] {e}")
+    
     return news_list
 
 def analyze_sentiment(title, summary):
