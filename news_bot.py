@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # [1] 사용자 설정 구역 (텔레그램 정보 입력)
@@ -306,6 +307,13 @@ def send_telegram_alert(article, sentiment):
 
 # [메인 실행 함수] 무한 루프 없이 한 번 실행되고 종료됨 (GitHub Actions 전용)
 def main():
+    # 🌙 한국 시간(KST) 기준 방해금지 시간(23시~07시) 설정
+    kst = timezone(timedelta(hours=9))
+    now_hour = datetime.now(kst).hour
+    if now_hour >= 23 or now_hour < 7:
+        print(f"🌙 방해금지 시간({now_hour}시)입니다. 아침 7시까지 수집을 일시 정지합니다.")
+        return  # 여기서 봇을 바로 종료시킴
+    
     print(f"🚀 [{KEYWORD}] 1회성 뉴스 클리핑 및 전송을 시작합니다...")
     sent_links = load_sent_links()
     seen_titles = set()
