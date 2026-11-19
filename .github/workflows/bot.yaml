@@ -1,10 +1,12 @@
 name: KEPCO-MCS News Bot
 
 on:
-  schedule:
-    # 💡 요일 제한(1-5)을 없애고 매일(*) 24시간 동안 10분 간격으로 실행
-    - cron: '*/10 * * * *'
+  # 💡 외부 스케줄러(cron-job.org)와 중복 실행을 막기 위해 기존 깃허브 cron은 비활성화
+  # schedule:
+  #   - cron: '*/10 * * * *'
   workflow_dispatch: # 웹에서 수동으로 즉시 실행할 수 있는 버튼 활성화
+  repository_dispatch: # 외부 스케줄러(cron-job.org)에서 10분마다 호출하는 트리거
+    types: [run-news-bot]
 
 # 💡 [핵심 추가] 깃허브 서버가 파일 변경사항을 저장(Commit)할 수 있도록 쓰기 권한 부여
 permissions:
