@@ -99,17 +99,19 @@ def fetch_naver_news(keyword):
         print(f"[네이버 크롤링 오류] {e}")
     return news_list
 
-# 2. 다음 뉴스 크롤링
+# 다음 뉴스 크롤링
 def fetch_daum_news(keyword):
     url = "https://search.daum.net/search"
     params = {"w": "news", "q": keyword, "sort": "recency"}
+    daum_headers = {**HEADERS, "Referer": "https://www.daum.net/"}
     news_list = []
     try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        res = requests.get(url, params=params, headers=daum_headers, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            for item in soup.select("ul.c-list-basic > li")[:10]:
-                title_el = item.select_one("div.item-title a")
+            items = soup.select("div.wrap_cont, ul.c-list-basic > li")[:10]
+            for item in items:
+                title_el = item.select_one("a.tit_main, div.item-title a")
                 if not title_el:
                     continue
                 title = clean_text(title_el.get_text())
@@ -117,16 +119,27 @@ def fetch_daum_news(keyword):
                 if not link:
                     continue
 
-                desc_el = item.select_one("p.conts-desc")
+                desc_el = item.select_one("a.desc, p.desc, p.conts-desc")
                 desc = clean_text(desc_el.get_text()) if desc_el else "요약 내용 없음"
 
-                press_el = item.select_one("div.c-tit-doc span.tit_item, span.txt_info")
+                press_el = item.select_one("a.f_nb, span.f_nb, div.c-tit-doc span.tit_item, span.txt_info")
                 press = clean_text(press_el.get_text()) if press_el else "다음 뉴스"
 
-                date_el = item.select_one("span.gem-subinfo, span.txt_info:nth-of-type(2)")
-                pub_date = clean_text(date_el.get_text()) if date_el else "최근"
-                
-                news_list.append({"portal": "다음 뉴스", "press": press, "pub_date": pub_date, "title": title, "summary": desc, "link": link})
+                pub_date = "최근"
+                for sp in item.select("span.f_nb, span.gem-subinfo, span.txt_info"):
+                    txt = clean_text(sp.get_text())
+                    if any(k in txt for k in ["전", "분", "시간", "일", "202", "."]):
+                        pub_date = txt
+                        break
+
+                news_list.append({
+                    "portal": "다음 뉴스",
+                    "press": press,
+                    "pub_date": pub_date,
+                    "title": title,
+                    "summary": desc,
+                    "link": link
+                })
     except Exception as e:
         print(f"[다음 크롤링 오류] {e}")
     return news_list
