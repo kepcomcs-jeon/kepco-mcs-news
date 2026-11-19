@@ -1,1 +1,2 @@
 safety_check_app/.streamlit/secrets.toml
+__pycache__/
