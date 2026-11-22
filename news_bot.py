@@ -2,15 +2,11 @@ import os
 import time
 import html
 import re
-import urllib.parse
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-from datetime import timezone, timedelta
+from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # [1] 사용자 설정 구역 (텔레그램 정보 입력)
@@ -99,7 +95,7 @@ def fetch_naver_news(keyword):
         print(f"[네이버 크롤링 오류] {e}")
     return news_list
 
-# 다음 뉴스 크롤링
+# 2. 다음 뉴스 크롤링
 def fetch_daum_news(keyword):
     url = "https://search.daum.net/search"
     params = {"w": "news", "q": keyword, "sort": "recency"}
@@ -142,78 +138,6 @@ def fetch_daum_news(keyword):
                 })
     except Exception as e:
         print(f"[다음 크롤링 오류] {e}")
-    return news_list
-
-# 3. 구글 뉴스 RSS 크롤링 (포털 비제휴 전문지·지역지 수집용)
-def fetch_google_news(keyword):
-    # 최근 1일 이내(when:1d) 기사를 검색하여 최신순 정렬
-    encoded_kw = urllib.parse.quote(f"{keyword} when:1d")
-    url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
-    news_list = []
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            items = root.findall(".//item")
-            
-            # 발행일시(pubDate) 기준 최신순 정렬
-            def parse_pub_date(item):
-                pub_el = item.find("pubDate")
-                if pub_el is not None and pub_el.text:
-                    try:
-                        return parsedate_to_datetime(pub_el.text)
-                    except Exception:
-                        pass
-                return parsedate_to_datetime("Thu, 01 Jan 1970 00:00:00 GMT")
-
-            sorted_items = sorted(items, key=parse_pub_date, reverse=True)[:10]
-            kst = timezone(timedelta(hours=9))
-
-            for item in sorted_items:
-                raw_title = item.findtext("title", "")
-                link = item.findtext("link", "")
-                if not raw_title or not link:
-                    continue
-
-                source_el = item.find("source")
-                press = clean_text(source_el.text) if (source_el is not None and source_el.text) else "구글 뉴스"
-
-                # 제목 끝에 붙는 ' - 언론사명' 제거
-                if " - " in raw_title:
-                    raw_title_main, tail_press = raw_title.rsplit(" - ", 1)
-                    if press == "구글 뉴스":
-                        press = clean_text(tail_press)
-                else:
-                    raw_title_main = raw_title
-
-                title = clean_text(raw_title_main)
-
-                # 발행일시 한국 시간(KST) 변환
-                pub_date_raw = item.findtext("pubDate", "")
-                pub_date = "최근"
-                if pub_date_raw:
-                    try:
-                        dt = parsedate_to_datetime(pub_date_raw).astimezone(kst)
-                        pub_date = dt.strftime("%Y-%m-%d %H:%M")
-                    except Exception:
-                        pub_date = "최근"
-
-                desc_raw = item.findtext("description", "")
-                desc = clean_text(desc_raw) if desc_raw else title
-
-                # 💡 2차 검증: 제목이나 요약 내용에 키워드가 진짜로 들어있을 때만 추가
-                if keyword in title or keyword in desc:
-                    news_list.append({
-                        "portal": "구글 뉴스",
-                        "press": press,
-                        "pub_date": pub_date,
-                        "title": title,
-                        "summary": desc,
-                        "link": link
-                    })
-    except Exception as e:
-        print(f"[구글 크롤링 오류] {e}")
-    
     return news_list
 
 def analyze_sentiment(title, summary):
@@ -334,9 +258,8 @@ def main():
     
     naver_articles = fetch_naver_news(KEYWORD)
     daum_articles = fetch_daum_news(KEYWORD)
-    google_articles = fetch_google_news(KEYWORD)
     
-    all_articles = naver_articles + daum_articles + google_articles
+    all_articles = naver_articles + daum_articles
     new_count = 0
     
     for article in reversed(all_articles):
