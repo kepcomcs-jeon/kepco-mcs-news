@@ -162,7 +162,7 @@ def analyze_sentiment(title, summary):
         print("⚠️ GEMINI_API_KEY가 설정되지 않아 키워드 방식으로 분석합니다.")
         return analyze_sentiment_fallback(title, summary)
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     prompt = (
         f"당신은 공기업 '{KEYWORD}'의 홍보 담당자입니다.\n"
         f"아래 뉴스 기사의 제목과 요약을 읽고, '{KEYWORD}' 입장에서 이 기사가 긍정적인지, 부정적인지, 중립적인지 판단하세요.\n"
