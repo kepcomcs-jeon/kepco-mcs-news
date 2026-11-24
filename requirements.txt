@@ -1,4 +1,4 @@
-google-generativeai
+google-genai
 streamlit
 pillow
 pandas
@@ -7,6 +7,5 @@ streamlit-geolocation
 geopy
 pytz
 python-docx
-google-generativeai>=0.7.0
 streamlit-drawable-canvas
 numpy
