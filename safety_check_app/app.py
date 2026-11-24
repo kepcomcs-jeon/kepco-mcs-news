@@ -872,7 +872,7 @@ def main() -> None:
         st.success(f"✅ 현재 현장 주소: {st.session_state['current_address']} ({st.session_state['gps_coords']})")
 
     col1, col2 = st.columns(2)
-    zone_code = col1.text_input("작업 구역 코드", value="(구역을 입력하세요")
+    zone_code = col1.text_input("작업 구역 코드", value="(구역을 입력하세요)")
     work_type = col2.selectbox("공종 선택", ["전력량계 검침", "청구서 송달/현장방문", "계기 교체/전기작업", "고소작업", "도서발전소 설비점검", "기타작업"])
 
     weight_mul = get_zone_weight_multiplier(zone_code, work_type)
