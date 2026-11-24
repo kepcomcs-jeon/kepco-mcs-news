@@ -912,7 +912,28 @@ def main() -> None:
 
     if st.session_state["before_marked_img"] is not None and st.session_state["hazards"]:
         st.image(st.session_state["before_marked_img"], caption="1차 위험요인 번호 마킹 결과", use_container_width=True)
-        st.markdown("**안전관리자 검토 및 오탐·점수 보정 (구역 이력 DB 자동 학습)**")
+        # ✅ [추가] 작업자가 바로 보고 조치할 수 있는 유해·위험요인 및 감소대책 한눈에 보기
+        st.markdown("#### 🚨 AI 판독 결과 및 필수 감소대책 (현장 조치 가이드)")
+        for h in st.session_state["hazards"]:
+            if h.get("excluded", False):
+                continue
+            badge = "🔴 상" if h["grade"] == "상" else ("🟠 중" if h["grade"] == "중" else "🔵 하")
+            st.markdown(
+                f"""
+                <div style="padding: 12px 15px; border-radius: 8px; border-left: 5px solid {'#DC2626' if h['grade']=='상' else ('#EA580C' if h['grade']=='중' else '#2563EB')}; background-color: #F8FAFC; margin-bottom: 10px;">
+                    <div style="font-weight: bold; font-size: 15px; margin-bottom: 4px;">
+                        #{h['id']} [{badge} / {h['final_score']}점] {h['hazard_name']} ({h['accident_type']})
+                    </div>
+                    <div style="font-size: 14px; color: #334155;">
+                        👉 <b>필수 감소대책:</b> {h['countermeasure']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+        st.markdown("**🔧 안전관리자 검토 및 오탐·점수 보정 (수정 필요 시에만 펼쳐서 조정)**")
         for h in st.session_state["hazards"]:
             with st.expander(f"#{h['id']} [{h['grade']} / {h['final_score']}점] {h['hazard_name']}", expanded=False):
                 c_a, c_b = st.columns([1, 2])
