@@ -134,7 +134,7 @@ def analyze_initial_hazards(
 
 [현장 정보]
 - 지점명: {branch_name}
-- 현장/전주번호: {zone_code}
+- 현장명: {zone_code}
 - 공종(작업): {work_type}
 
 [출력 JSON 스키마 - 반드시 유효한 JSON만 출력]
@@ -162,7 +162,7 @@ def analyze_initial_hazards(
 - x_pct, y_pct: 사진 내 위험요인 중심 좌표 (0~100 백분율)
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         contents=[prompt, img],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -234,7 +234,7 @@ def verify_before_after_images(
 }}
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         contents=[prompt, before_img, after_img],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
