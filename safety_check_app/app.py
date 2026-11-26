@@ -47,7 +47,27 @@ st.set_page_config(
     page_icon=COMPANY_LOGO_URL,
     layout="wide",
 )
-
+st.markdown(
+    """
+    <style>
+    /* 모든 모드 제목(st.title) 모바일·PC 반응형 크기 조절 및 한글 단어 잘림 방지 */
+    [data-testid="stAppViewContainer"] h1 {
+        font-size: clamp(19px, 5vw, 28px) !important;
+        line-height: 1.35 !important;
+        word-break: keep-all !important;
+        padding: 0.3rem 0 0.6rem 0 !important;
+    }
+    /* 소제목(st.header / st.subheader) 크기 조절 및 한글 단어 잘림 방지 */
+    [data-testid="stAppViewContainer"] h2,
+    [data-testid="stAppViewContainer"] h3 {
+        font-size: clamp(16px, 4.2vw, 22px) !important;
+        line-height: 1.4 !important;
+        word-break: keep-all !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 WORK_TYPES = [
