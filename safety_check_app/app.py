@@ -40,9 +40,11 @@ except ImportError:
 # ==========================================
 # 페이지 기본 설정 및 상수
 # ==========================================
+COMPANY_LOGO_URL = "https://raw.githubusercontent.com/jjeonceo1-glitch/kepco-mcs-news/main/safety_check_app/app_icon.png"
+
 st.set_page_config(
     page_title="한전MCS AI 위험성평가 & 작업승인(PTW)",
-    page_icon="⚡",
+    page_icon=COMPANY_LOGO_URL,
     layout="wide",
 )
 
@@ -995,7 +997,17 @@ def build_legal_ptw_docx(
 # 사이드바: QR 지점 자동인식 및 역할별 인증
 # ==========================================
 def render_sidebar_auth(branches: list[dict[str, Any]]) -> dict[str, Any]:
-    st.sidebar.title("⚡ 한전MCS 안전 플랫폼")
+    st.sidebar.markdown(
+        f"""
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+            <img src="{COMPANY_LOGO_URL}" alt="한전MCS"
+                 style="height: 28px; width: auto; border-radius: 6px; object-fit: contain;" />
+            <span style="font-size: 17px; font-weight: 800; color: #0F172A;">한전MCS 안전 플랫폼</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     mode = st.sidebar.radio(
         "접속 모드 선택",
         ["👷 현장 작업자 모드", "🛡️ 지점 안전관리자 모드", "🏢 본사 통합 관제"],
@@ -1687,7 +1699,23 @@ def main() -> None:
 
     auth = render_sidebar_auth(branches)
     if not auth["authenticated"]:
-        st.title("⚡ 한전MCS AI 위험성평가 & 작업승인(PTW)")
+        st.markdown(
+            f"""
+            <div style="display: flex; align-items: center; gap: 12px; margin: 4px 0 18px 0;">
+                <img src="{COMPANY_LOGO_URL}" alt="한전MCS 로고"
+                     style="height: 44px; width: auto; border-radius: 8px; object-fit: contain; flex-shrink: 0;" />
+                <div style="line-height: 1.3;">
+                    <div style="font-size: 13px; font-weight: 700; color: #0052CC; letter-spacing: -0.2px;">
+                        한전MCS
+                    </div>
+                    <div style="font-size: clamp(17px, 4.6vw, 24px); font-weight: 800; color: #0F172A; word-break: keep-all;">
+                        AI 위험성평가 &amp; 작업승인(PTW)
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.info("좌측 사이드바에서 접속 모드와 소속 지점을 선택하고 PIN 번호를 입력해 로그인하세요.")
         st.markdown(
             """
