@@ -13,7 +13,7 @@ from docx import Document
 from docx.shared import Inches
 from google import genai
 from google.genai import types
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import streamlit as st
 
 import db_supabase as db
@@ -312,14 +312,16 @@ def render_hazard_cards(hazards: list[dict[str, Any]]) -> None:
 
 
 def capture_image_widget(key_prefix: str, label: str) -> Image.Image | None:
-    """모바일 카메라 촬영 및 앨범/갤러리 선택을 지원하는 파일 업로더를 제공합니다."""
+    """모바일 카메라 촬영 및 앨범/갤러리 선택을 지원하며 EXIF 방향을 자동 보정합니다."""
     up_file = st.file_uploader(
         f"🖼️ {label} (사진 촬영 또는 앨범 선택)",
         type=["jpg", "jpeg", "png"],
         key=f"{key_prefix}_file",
     )
     if up_file is not None:
-        return Image.open(up_file).convert("RGB")
+        img = Image.open(up_file)
+        img = ImageOps.exif_transpose(img)  # 스마트폰 촬영 사진 자동 정방향 보정
+        return img.convert("RGB")
     return None
 
 
