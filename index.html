@@ -12,13 +12,20 @@
     <link rel="shortcut icon" href="https://raw.githubusercontent.com/jjeonceo1-glitch/kepco-mcs-news/main/safety_check_app/app_icon.png">
 
     <style>
-        /* 테두리나 여백 없이 스마트폰 화면 전체를 앱으로 채우기 */
         body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background-color: #ffffff; }
         iframe { width: 100%; height: 100%; border: none; }
     </style>
 </head>
 <body>
-    <!-- 앱 실제 주소 연결 (여백 제거 옵션 포함) -->
-    <iframe src="https://kepcomcs-safety.streamlit.app/?embed=true" allow="geolocation"></iframe>
+    <!-- 카메라와 위치(GPS) 권한 모두 허용 -->
+    <iframe id="safety-frame" allow="camera; microphone; geolocation" allowfullscreen></iframe>
+
+    <script>
+        // ?branch=영광지점 같은 QR 파라미터가 있으면 그대로 유지하면서 embed=true 추가
+        const params = new URLSearchParams(window.location.search);
+        params.set("embed", "true");
+        document.getElementById("safety-frame").src =
+            "https://kepcomcs-safety.streamlit.app/?" + params.toString();
+    </script>
 </body>
 </html>
