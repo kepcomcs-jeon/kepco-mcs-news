@@ -312,20 +312,14 @@ def render_hazard_cards(hazards: list[dict[str, Any]]) -> None:
 
 
 def capture_image_widget(key_prefix: str, label: str) -> Image.Image | None:
-    """모바일 카메라 메모리 초기화 방지를 위해 [직접 촬영]과 [앨범 선택] 탭을 제공합니다."""
-    tab_cam, tab_file = st.tabs([f"📷 {label} (브라우저 직접 촬영)", f"🖼️ {label} (앨범/갤러리 선택)"])
-    img_data = None
-    with tab_cam:
-        cam_file = st.camera_input("카메라로 현장 촬영", key=f"{key_prefix}_cam")
-        if cam_file is not None:
-            img_data = cam_file
-    with tab_file:
-        up_file = st.file_uploader("미리 찍어둔 현장 사진 업로드 (권장)", type=["jpg", "jpeg", "png"], key=f"{key_prefix}_file")
-        if up_file is not None:
-            img_data = up_file
-
-    if img_data is not None:
-        return Image.open(img_data).convert("RGB")
+    """모바일 카메라 촬영 및 앨범/갤러리 선택을 지원하는 파일 업로더를 제공합니다."""
+    up_file = st.file_uploader(
+        f"🖼️ {label} (사진 촬영 또는 앨범 선택)",
+        type=["jpg", "jpeg", "png"],
+        key=f"{key_prefix}_file",
+    )
+    if up_file is not None:
+        return Image.open(up_file).convert("RGB")
     return None
 
 
