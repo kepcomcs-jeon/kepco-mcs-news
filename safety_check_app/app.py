@@ -63,6 +63,14 @@ STATUS_LABELS = {
     "APPROVED": "🟢 PTW 최종 승인 완료",
 }
 
+ALTERNATIVE_MEASURE_PRESETS = [
+    "보호구 착용 강화(턱끈 체결 안전모·절연장갑) 및 안전거리 확보 후 작업",
+    "고객 적치물·장애물 우회 동선 확보 및 주의 작업 실시",
+    "타인 소유 노후 설비·구조물 접촉 금지 및 원거리 육안·장비 점검",
+    "고객 안내 후 안전 위치 확보 및 작업시간 최소화",
+    "직접 입력",
+]
+
 
 def now_kst() -> datetime.datetime:
     return datetime.datetime.now(KST)
@@ -235,7 +243,7 @@ def analyze_initial_hazards(
     work_type: str,
     weight_multiplier: float,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """1차 현장 사진 AI 위험성평가 분석 + 구역 과거 이력 가중치 자동 반영."""
+    """1차 현장 사진 AI 위험성평가 분석 + 고객 소유물 불간섭 원칙 및 구역 이력 가중치 반영."""
     client = get_gemini_client()
     prompt = f"""
 당신은 대한민국 산업안전보건법(고용노동부 고시 제2024-76호) 기준의 베테랑 전기·현장 안전관리자입니다.
@@ -245,6 +253,11 @@ def analyze_initial_hazards(
 - 지점명: {branch_name}
 - 현장명: {zone_code}
 - 공종(작업): {work_type}
+
+[현장 제약 조건 - 타인 재산 불간섭 원칙 (필수 준수)]
+- 작업자는 고객 사유지·외부 설비를 방문 점검하는 한전MCS 직원입니다.
+- 고객 소유의 적치물(장작, 잡자재, 화분, 차량 등)이나 타인 소유의 노후 건축물·처마·담장 등을 작업자가 임의로 치우거나 철거·보수하라는 대책은 제시하지 마세요.
+- 타인 재산·구조물과 관련된 위험요인은 반드시 작업자가 현장에서 즉시 통제 가능한 관리적 대책과 보호구 착용 대책(예: 턱끈 체결 안전모 필착, 절연장갑 착용, 안전거리 확보, 적치물 우회 동선 확보, 노출 설비 접촉 금지 및 한전 지사 보고 등) 중심으로 감소대책을 작성하세요.
 
 [출력 JSON 스키마 - 반드시 유효한 JSON만 출력]
 {{
@@ -256,7 +269,7 @@ def analyze_initial_hazards(
       "current_measure": "사진상 확인되는 현재 조치 상태 (예: 일반 작업복 및 작업 장갑 착용 상태, 육안 주의에 의존 등)",
       "frequency": 3,
       "severity": 4,
-      "countermeasure": "작업자가 즉시 실행하고 사진으로 증명할 수 있는 구체적 감소대책",
+      "countermeasure": "타인 재산을 훼손·이동하지 않고 작업자가 즉시 실행 가능한 구체적 감소대책",
       "x_pct": 50,
       "y_pct": 50
     }}
@@ -308,26 +321,90 @@ def analyze_initial_hazards(
     return processed, tbm_points
 
 
+def build_non_photo_verification(
+    active_hazards: list[dict[str, Any]],
+    mode: str,
+    alt_measures: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """하 등급 전용 패스트트랙 또는 타인 재산 제거 불가 대체조치 완료 시 검증 결과 객체를 생성합니다."""
+    alt_measures = alt_measures or {}
+    items: list[dict[str, Any]] = []
+    for h in active_hazards:
+        h_id = int(h["id"])
+        if mode == "LOW_ONLY_FAST_TRACK":
+            reason = "하 등급(허용 가능 수준)으로 개선 후 사진 검증 생략 — 기본 안전수칙 준수 및 TBM 확인"
+            is_alt = False
+            alt_text = ""
+        else:
+            alt_text = alt_measures.get(h_id, ALTERNATIVE_MEASURE_PRESETS[0])
+            reason = f"타인 재산·시설물로 물리적 제거 불가 → 대체조치 적용: {alt_text}"
+            is_alt = True
+
+        items.append({
+            "id": h_id,
+            "hazard_name": h["hazard_name"],
+            "grade": h["grade"],
+            "countermeasure": h["countermeasure"],
+            "resolved": True,
+            "is_alternative": is_alt,
+            "alternative_measure": alt_text,
+            "reason": reason,
+        })
+
+    if mode == "LOW_ONLY_FAST_TRACK":
+        mode_label = "하 등급 전용 패스트트랙 (개선 후 사진 생략)"
+        overall_comment = "허용 가능 수준(하 등급)만 존재하여 기본 안전수칙 준수 및 TBM 확인으로 즉시 작업승인 가능"
+    else:
+        mode_label = "타인 재산·시설물 제거 불가에 따른 대체 안전조치 확정"
+        overall_comment = "고객 소유물·외부 구조물로 물리적 제거가 불가하여 작업자 보호구·우회 접근 등 대체 안전조치로 승인 통과"
+
+    return {
+        "passed": True,
+        "mode": mode,
+        "mode_label": mode_label,
+        "resolution_rate": 100.0,
+        "high_total": 0,
+        "high_resolved": 0,
+        "items": items,
+        "overall_comment": overall_comment,
+    }
+
+
 def verify_before_after_images(
     before_img: Image.Image,
     after_img: Image.Image,
     active_hazards: list[dict[str, Any]],
+    alt_measures: dict[int, str] | None = None,
 ) -> dict[str, Any]:
-    """2차 개선 전·후 사진 AI 대조 검증 및 폐루프(Closed-loop) 승인 게이트 판정."""
-    client = get_gemini_client()
-    hazard_summary = [
-        {
-            "id": h["id"],
-            "hazard_name": h["hazard_name"],
-            "grade": h["grade"],
-            "countermeasure": h["countermeasure"],
-        }
-        for h in active_hazards
+    """2차 개선 전·후 사진 AI 대조 검증 (타인 재산 불간섭 원칙 + 중·하 대체조치 통합 판정)."""
+    alt_measures = alt_measures or {}
+    photo_targets = [
+        h for h in active_hazards
+        if not (h["grade"] in ("중", "하") and int(h["id"]) in alt_measures)
     ]
-    prompt = f"""
+
+    res_map: dict[int, dict[str, Any]] = {}
+    overall_comment = ""
+
+    if photo_targets:
+        client = get_gemini_client()
+        hazard_summary = [
+            {
+                "id": h["id"],
+                "hazard_name": h["hazard_name"],
+                "grade": h["grade"],
+                "countermeasure": h["countermeasure"],
+            }
+            for h in photo_targets
+        ]
+        prompt = f"""
 당신은 작업승인(PTW) 최종 검증 AI 감사관입니다.
 첫 번째 사진은 [개선 전], 두 번째 사진은 [개선 후] 현장 사진입니다.
-아래 확정된 위험요인 및 필수 감소대책 목록을 기준으로, 두 번째 사진에서 실제로 안전조치가 완료되었는지 엄격하게 대조 판정하세요.
+아래 확정된 위험요인 및 필수 감소대책 목록을 기준으로, 두 번째 사진에서 실제로 안전조치가 완료되었는지 대조 판정하세요.
+
+[현장 검증 원칙 - 타인 재산 불간섭 기준 (필수 준수)]
+- 작업자는 고객 사유지·외부 현장을 방문 중이므로, 타인 소유의 적치물·노후 건축물·처마·외부 설비가 배경에 그대로 남아 있더라도 물리적 철거·이동을 요구하지 마세요.
+- 개선 후 사진에서 작업자가 보호구(턱끈 체결 안전모, 절연장갑 등)를 착용했거나, 위험 구역에서 안전거리를 확보·우회 접근 위치로 이동하는 등 감소대책에 명시된 작업자 통제 가능 조치가 확인되면 해소(resolved: true)로 판정하세요.
 
 [검증 대상 목록]
 {json.dumps(hazard_summary, ensure_ascii=False)}
@@ -344,39 +421,59 @@ def verify_before_after_images(
   "overall_comment": "전체 안전조치 이행 상태에 대한 종합 의견"
 }}
 """
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=[prompt, before_img, after_img],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
-    )
-    data = json.loads(response.text)
-    res_map = {int(r["id"]): r for r in data.get("results", [])}
+        response = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=[prompt, before_img, after_img],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        data = json.loads(response.text)
+        res_map = {int(r["id"]): r for r in data.get("results", [])}
+        overall_comment = data.get("overall_comment", "")
 
     verified_items: list[dict[str, Any]] = []
     high_total = 0
     high_resolved = 0
     resolved_count = 0
+    has_alt = False
 
     for h in active_hazards:
-        r = res_map.get(int(h["id"]), {"resolved": False, "reason": "판독 불가"})
-        is_res = bool(r.get("resolved", False))
-        if is_res:
+        h_id = int(h["id"])
+        if h["grade"] in ("중", "하") and h_id in alt_measures:
+            has_alt = True
+            alt_text = alt_measures[h_id]
             resolved_count += 1
-        if h["grade"] == "상":
-            high_total += 1
+            verified_items.append({
+                "id": h_id,
+                "hazard_name": h["hazard_name"],
+                "grade": h["grade"],
+                "countermeasure": h["countermeasure"],
+                "resolved": True,
+                "is_alternative": True,
+                "alternative_measure": alt_text,
+                "reason": f"타인 재산·시설물로 물리적 제거 불가 → 대체조치 적용: {alt_text}",
+            })
+        else:
+            r = res_map.get(h_id, {"resolved": False, "reason": "판독 불가"})
+            is_res = bool(r.get("resolved", False))
             if is_res:
-                high_resolved += 1
-        verified_items.append({
-            "id": h["id"],
-            "hazard_name": h["hazard_name"],
-            "grade": h["grade"],
-            "countermeasure": h["countermeasure"],
-            "resolved": is_res,
-            "reason": r.get("reason", ""),
-        })
+                resolved_count += 1
+            if h["grade"] == "상":
+                high_total += 1
+                if is_res:
+                    high_resolved += 1
+            verified_items.append({
+                "id": h_id,
+                "hazard_name": h["hazard_name"],
+                "grade": h["grade"],
+                "countermeasure": h["countermeasure"],
+                "resolved": is_res,
+                "is_alternative": False,
+                "alternative_measure": "",
+                "reason": r.get("reason", ""),
+            })
 
     total = len(active_hazards)
     resolution_rate = round((resolved_count / total) * 100, 1) if total > 0 else 100.0
@@ -384,13 +481,21 @@ def verify_before_after_images(
     rate_passed = (resolution_rate >= 80.0)
     passed = high_passed and rate_passed
 
+    mode_label = (
+        "2차 AI 개선 전·후 대조 + 타인 재산 대체조치 병행"
+        if has_alt
+        else "2차 AI 개선 전·후 사진 대조 검증"
+    )
+
     return {
         "passed": passed,
+        "mode": "PHOTO_AND_ALT" if has_alt else "PHOTO_ONLY",
+        "mode_label": mode_label,
         "resolution_rate": resolution_rate,
         "high_total": high_total,
         "high_resolved": high_resolved,
         "items": verified_items,
-        "overall_comment": data.get("overall_comment", ""),
+        "overall_comment": overall_comment or "개선 후 사진 및 대체 안전조치 기준 검증 완료",
     }
 
 
@@ -441,6 +546,16 @@ def capture_image_widget(key_prefix: str, label: str) -> Image.Image | None:
         img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
     return None
+
+
+def _get_fallback_after_img(rec: dict[str, Any], before_marked: Image.Image | None) -> Image.Image:
+    """db_supabase.complete_ptw_approval 호환을 위해 개선 후 사진 생략 시 대체 이미지 반환."""
+    if before_marked is not None:
+        return before_marked
+    orig = db.download_image_from_url(rec.get("before_img_url", ""))
+    if orig is not None:
+        return orig
+    return Image.new("RGB", (400, 120), (245, 246, 248))
 
 
 # ==========================================
@@ -570,6 +685,9 @@ def build_legal_ptw_docx(
     dt_date = dt.strftime("%Y. %m. %d.")
 
     active = [h for h in (hazards or []) if not h.get("excluded", False)]
+    ver_items = verification.get("items", [])
+    ver_map = {int(v["id"]): v for v in ver_items}
+
     cnt_all = len(active)
     cnt_high = sum(1 for h in active if h.get("grade") == "상")
     cnt_mid = sum(1 for h in active if h.get("grade") == "중")
@@ -577,7 +695,6 @@ def build_legal_ptw_docx(
 
     signer_display = ", ".join(signers) if signers else ""
 
-    # 평가 대상(GPS 좌표 및 현장명) 포맷팅
     target_lines: list[str] = []
     if gps_coords and "," in gps_coords:
         lat_s, lon_s = [p.strip() for p in gps_coords.split(",", 1)]
@@ -764,12 +881,18 @@ def build_legal_ptw_docx(
         grade_bg = "FEE4E2" if grade == "상" else ("FEF0C7" if grade == "중" else "D1FADF")
         grade_col = (180, 35, 24) if grade == "상" else ((181, 71, 8) if grade == "중" else (2, 122, 72))
 
+        measure_text = str(h.get("countermeasure", ""))
+        v_item = ver_map.get(int(h.get("id", r_idx)), {})
+        if v_item.get("is_alternative"):
+            alt_m = v_item.get("alternative_measure", "")
+            measure_text += f"\n※ [대체조치] 고객 소유물·외부 시설물로 직접 제거 불가하여 대체 적용 ({alt_m})"
+
         _write_cell(hz_tbl.cell(r_idx, 0), str(h.get("id", r_idx)), size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
         _write_cell(hz_tbl.cell(r_idx, 1), str(h.get("hazard_name", "")), size=7.9)
         _write_cell(hz_tbl.cell(r_idx, 2), str(h.get("accident_type", "-")), size=7.9, align=WD_ALIGN_PARAGRAPH.CENTER)
         _write_cell(hz_tbl.cell(r_idx, 3), str(h.get("current_measure") or "현장 확인 필요"), size=7.9)
         _write_cell(hz_tbl.cell(r_idx, 4), grade, size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg=grade_bg, color=grade_col)
-        _write_cell(hz_tbl.cell(r_idx, 5), str(h.get("countermeasure", "")), size=7.9)
+        _write_cell(hz_tbl.cell(r_idx, 5), measure_text, size=7.9)
 
         c_done = hz_tbl.cell(r_idx, 6)
         _write_cell(c_done, f"{signer_display}\n{dt_date}" if signer_display else dt_date, size=7.7, align=WD_ALIGN_PARAGRAPH.CENTER)
@@ -821,11 +944,12 @@ def build_legal_ptw_docx(
     ptw_tbl = doc.add_table(rows=3, cols=2)
     ptw_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     _set_table_borders(ptw_tbl)
+    mode_label = verification.get("mode_label", "2차 AI 개선 전·후 사진 대조 검증")
     ptw_info_rows = [
         ("PTW 승인번호 / 일시", f"{ptw_id} ({dt_full})"),
         (
-            "2차 AI 개선 전·후 검증",
-            f"승인 통과 (전체 해소율 {verification.get('resolution_rate', 0)}%, "
+            "이행 검증 방식 / 결과",
+            f"{mode_label} — 승인 통과 (전체 해소율 {verification.get('resolution_rate', 0)}%, "
             f"고위험 {verification.get('high_resolved', 0)}/{verification.get('high_total', 0)} 해소)",
         ),
         ("위·변조 방지 해시(SHA-256)", integrity_hash),
@@ -835,14 +959,13 @@ def build_legal_ptw_docx(
         _write_cell(ptw_tbl.cell(r_idx, 1), str(v), size=8.0)
     _set_col_widths(ptw_tbl, [4.6, 13.4])
 
-    ver_items = verification.get("items", [])
     if ver_items:
         p_ver = doc.add_paragraph()
         p_ver.paragraph_format.space_before = Pt(5)
         p_ver.paragraph_format.space_after = Pt(2)
-        _set_font(p_ver.add_run("[항목별 개선 후 AI 검증 판정]"), size=8.4, bold=True)
+        _set_font(p_ver.add_run("[항목별 안전조치 이행 검증 내역]"), size=8.4, bold=True)
         for item in ver_items:
-            mark = "해소" if item.get("resolved") else "미조치"
+            mark = "대체조치" if item.get("is_alternative") else ("해소" if item.get("resolved") else "미조치")
             p_item = doc.add_paragraph()
             p_item.paragraph_format.space_before = Pt(1)
             p_item.paragraph_format.space_after = Pt(1)
@@ -908,7 +1031,6 @@ def render_sidebar_auth(branches: list[dict[str, Any]]) -> dict[str, Any]:
         st.sidebar.caption("※ 지점 공용 PIN을 입력하면 점검을 시작할 수 있습니다.")
         return {"mode": "WORKER", "authenticated": False, "branch_name": selected_branch}
 
-    # 지점 안전관리자 모드
     admin_pin = st.sidebar.text_input(f"[{selected_branch}] 안전관리자 전용 PIN", type="password")
     if admin_pin == str(branch_info["admin_pin"]):
         st.sidebar.success(f"{selected_branch} 안전관리자 인증 완료")
@@ -1011,7 +1133,6 @@ def render_worker_view(branch_name: str) -> None:
 
     # --- 탭 2: 조치 완료 및 PTW 발급 ---
     with tab_action:
-        # 방금 발급 완료된 평가표 다운로드 영역 유지
         if "last_ptw_download" in st.session_state:
             dl = st.session_state["last_ptw_download"]
             st.success(f"🎉 작업승인(PTW) 발급 완료! 승인번호: **{dl['ptw_id']}**")
@@ -1058,7 +1179,7 @@ def render_worker_view(branch_name: str) -> None:
             return
 
         # READY_FOR_ACTION 상태 -> 3~4단계 진행 가능
-        st.success("✅ 안전관리자 검토(또는 중·하 자동 통과) 완료! 아래 감소대책을 이행한 뒤 개선 후 사진을 올려주세요.")
+        st.success("✅ 안전관리자 검토(또는 중·하 자동 통과) 완료! 아래 내용을 확인하고 3~4단계를 진행하세요.")
         if rec.get("before_marked_url"):
             st.image(rec["before_marked_url"], caption="최종 확정된 1차 마킹 사진", width=480)
         hazards = rec.get("hazards_json") or []
@@ -1066,41 +1187,124 @@ def render_worker_view(branch_name: str) -> None:
         render_hazard_cards(hazards)
 
         st.markdown("---")
-        st.subheader("🔍 3단계: 안전조치 완료 후 사진 AI 대조 검증")
-        after_img = capture_image_widget(f"after_{rec['id']}", "개선 후 현장 사진")
+        st.subheader("🔍 3단계: 안전조치 이행 확인 (개선 후 검증 / 대체조치)")
 
         ver_key = f"verification_{rec['id']}"
         after_key = f"after_img_{rec['id']}"
 
-        if after_img is not None:
-            st.image(after_img, caption="업로드된 개선 후 사진", width=450)
-            if st.button("🔎 개선 전·후 AI 대조 검증 실행", type="primary", use_container_width=True):
-                with st.spinner("AI가 개선 전·후 사진을 대조하여 안전조치 이행 여부를 검증 중입니다..."):
-                    before_orig = db.download_image_from_url(rec.get("before_img_url", ""))
-                    if before_orig is None:
-                        st.error("개선 전 원본 사진을 불러오는 데 실패했습니다.")
-                    else:
-                        verification = verify_before_after_images(before_orig, after_img, active_hazards)
-                        st.session_state[ver_key] = verification
-                        st.session_state[after_key] = after_img
+        has_high_or_mid = any(h.get("grade") in ("상", "중") for h in active_hazards)
+
+        # (기능 3) 하 등급 전용 패스트트랙: 개선 후 사진 생략
+        if not has_high_or_mid:
+            st.success(
+                "🟢 **하 등급 전용(허용 가능 수준) 패스트트랙 적용**\n\n"
+                "고위험(상) 및 중위험(중) 항목이 없으므로 개선 후 사진 검증을 생략하고, "
+                "아래 4단계에서 TBM 안전수칙 확인 및 자필 서명만으로 즉시 작업승인(PTW)을 발급할 수 있습니다."
+            )
+            st.session_state[ver_key] = build_non_photo_verification(
+                active_hazards=active_hazards,
+                mode="LOW_ONLY_FAST_TRACK",
+            )
+            st.session_state[after_key] = None
+        else:
+            # (기능 2) 중·하 등급 항목별 '타인 재산·시설물 제거 불가 → 대체조치' 선택
+            alt_measures: dict[int, str] = {}
+            mid_low_hazards = [h for h in active_hazards if h.get("grade") in ("중", "하")]
+
+            if mid_low_hazards:
+                with st.expander(
+                    "🏠 타인 재산·시설물로 물리적 제거가 불가한 항목이 있나요? (중·하 등급 대체 안전조치 지정)",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "고객 사유지 적치물·노후 구조물 등 작업자가 임의로 치우거나 수리할 수 없는 항목을 체크하고 "
+                        "대체 안전조치를 선택하면, 해당 항목은 사진상 제거 여부 대신 대체조치 이행으로 기록·통과됩니다. "
+                        "(※ 고위험 '상' 등급은 반드시 안전조치 후 사진 검증이 필요합니다.)"
+                    )
+                    for h in mid_low_hazards:
+                        h_id = int(h["id"])
+                        use_alt = st.checkbox(
+                            f"#{h_id} [{h['grade']}] {h['hazard_name']} — 타인 재산·시설물로 제거 불가 (대체조치 적용)",
+                            key=f"alt_chk_{rec['id']}_{h_id}",
+                        )
+                        if use_alt:
+                            preset = st.selectbox(
+                                f"#{h_id} 적용할 대체 안전조치 선택",
+                                ALTERNATIVE_MEASURE_PRESETS,
+                                key=f"alt_sel_{rec['id']}_{h_id}",
+                            )
+                            if preset == "직접 입력":
+                                custom_txt = st.text_input(
+                                    f"#{h_id} 대체 안전조치 내용 직접 입력",
+                                    placeholder="예: 안전모 착용 및 적치물 우회 접근하여 검침 완료",
+                                    key=f"alt_txt_{rec['id']}_{h_id}",
+                                )
+                                alt_measures[h_id] = custom_txt.strip() or ALTERNATIVE_MEASURE_PRESETS[0]
+                            else:
+                                alt_measures[h_id] = preset
+
+            remaining_photo_targets = [
+                h for h in active_hazards
+                if not (h["grade"] in ("중", "하") and int(h["id"]) in alt_measures)
+            ]
+
+            if not remaining_photo_targets:
+                st.info(
+                    "🛡️ **모든 중·하 항목이 '타인 재산·시설물 제거 불가 → 대체 안전조치'로 지정되었습니다.**\n\n"
+                    "개선 후 사진 없이 아래 버튼으로 대체 안전조치 이행을 확정하고 4단계(서명·PTW 발급)로 넘어갈 수 있습니다."
+                )
+                if st.button("✅ 대체 안전조치 이행 확정 (4단계로 이동)", type="primary", use_container_width=True):
+                    st.session_state[ver_key] = build_non_photo_verification(
+                        active_hazards=active_hazards,
+                        mode="ALTERNATIVE_ONLY",
+                        alt_measures=alt_measures,
+                    )
+                    st.session_state[after_key] = None
+            else:
+                if alt_measures:
+                    st.info(
+                        f"대체조치 지정 {len(alt_measures)}건은 자동 해소 처리되며, "
+                        f"나머지 {len(remaining_photo_targets)}건(고위험 포함)에 대해 개선 후 사진을 검증합니다."
+                    )
+                after_img = capture_image_widget(f"after_{rec['id']}", "개선 후 현장 사진")
+
+                if after_img is not None:
+                    st.image(after_img, caption="업로드된 개선 후 사진", width=450)
+                    if st.button("🔎 개선 전·후 AI 대조 검증 실행", type="primary", use_container_width=True):
+                        with st.spinner("AI가 개선 전·후 사진 및 대체 안전조치를 검증 중입니다..."):
+                            before_orig = db.download_image_from_url(rec.get("before_img_url", ""))
+                            if before_orig is None:
+                                st.error("개선 전 원본 사진을 불러오는 데 실패했습니다.")
+                            else:
+                                verification = verify_before_after_images(
+                                    before_orig,
+                                    after_img,
+                                    active_hazards,
+                                    alt_measures=alt_measures,
+                                )
+                                st.session_state[ver_key] = verification
+                                st.session_state[after_key] = after_img
 
         if ver_key in st.session_state:
             ver = st.session_state[ver_key]
-            saved_after = st.session_state[after_key]
-            st.markdown("#### 📊 AI 대조 검증 판정 결과")
+            saved_after = st.session_state.get(after_key)
+            st.markdown(f"#### 📊 안전조치 검증 판정 결과 ({ver.get('mode_label', '')})")
             m1, m2, m3 = st.columns(3)
             m1.metric("전체 해소율 (기준 80%)", f"{ver['resolution_rate']}%")
             m2.metric("고위험(상) 해소 (기준 100%)", f"{ver['high_resolved']} / {ver['high_total']}")
             m3.metric("PTW 승인 게이트", "🟢 통과" if ver["passed"] else "🔴 보완 필요")
 
             for item in ver["items"]:
-                icon = "✅" if item["resolved"] else "❌"
+                icon = "🛡️" if item.get("is_alternative") else ("✅" if item["resolved"] else "❌")
                 st.write(f"{icon} **#{item['id']} [{item['grade']}] {item['hazard_name']}** — {item['reason']}")
             if ver.get("overall_comment"):
-                st.info(f"💬 AI 종합 소견: {ver['overall_comment']}")
+                st.info(f"💬 종합 소견: {ver['overall_comment']}")
 
             if not ver["passed"]:
-                st.error("🚫 고위험(상) 100% 해소 및 전체 80% 이상 해소 조건을 충족하지 못했습니다. 미조치 항목을 보완한 뒤 다시 촬영해 주세요.")
+                st.error(
+                    "🚫 고위험(상) 100% 해소 및 전체 80% 이상 해소 조건을 충족하지 못했습니다. "
+                    "미조치 항목을 보완해 다시 촬영하거나, 타인 소유물로 제거 불가한 중·하 항목은 위 대체 안전조치를 지정해 주세요."
+                )
                 return
 
             # --- 4단계: 전자서명 및 PTW 최종 발급 ---
@@ -1136,7 +1340,7 @@ def render_worker_view(branch_name: str) -> None:
                         except Exception:
                             pass
 
-            sig_check = st.checkbox("위 유해·위험요인 및 TBM 내용을 전원 숙지하고 안전조치를 완료했음을 확인합니다.")
+            sig_check = st.checkbox("위 유해·위험요인, 대체 안전조치 및 TBM 내용을 전원 숙지하고 안전수칙을 준수할 것을 확인합니다.")
 
             if st.button("🛡️ 최종 작업승인(PTW) 발급 및 법정 양식 생성", type="primary", use_container_width=True):
                 signers = [s.strip() for s in signers_raw.split(",") if s.strip()]
@@ -1165,6 +1369,12 @@ def render_worker_view(branch_name: str) -> None:
                     integrity_hash = hashlib.sha256(hash_payload.encode("utf-8")).hexdigest()
 
                     with st.spinner("최종 PTW 기록을 중앙 DB에 보존하고 현장 위험성 평가표를 생성 중입니다..."):
+                        before_marked = db.download_image_from_url(rec.get("before_marked_url", ""))
+                        db_after_img = (
+                            saved_after
+                            if saved_after is not None
+                            else _get_fallback_after_img(rec, before_marked)
+                        )
                         db.complete_ptw_approval(
                             ptw_id=ptw_id,
                             inspection_id=rec["id"],
@@ -1173,12 +1383,11 @@ def render_worker_view(branch_name: str) -> None:
                             work_type=rec["work_type"],
                             gps_coords=rec.get("gps_coords", ""),
                             address=rec.get("address", ""),
-                            after_img=saved_after,
+                            after_img=db_after_img,
                             verification=ver,
                             signers=signers,
                             integrity_hash=integrity_hash,
                         )
-                        before_marked = db.download_image_from_url(rec.get("before_marked_url", ""))
                         docx_bytes = build_legal_ptw_docx(
                             ptw_id=ptw_id,
                             branch_name=branch_name,
@@ -1216,7 +1425,6 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
         "⚙️ 담당자 인수인계 설정",
     ])
 
-    # --- 탭 1: 검토 대기함 ---
     with tab_review:
         col_h, col_b = st.columns([4, 1])
         col_h.subheader(f"[{branch_name}] 고위험(상) 검토 대기 건")
@@ -1302,7 +1510,6 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
                         st.success("확정 완료! 피드백이 가중치 DB에 누적되었으며, 현장 작업자 화면이 '조치 가능' 상태로 전환되었습니다.")
                         st.rerun()
 
-    # --- 탭 2: 우리 지점 승인 이력 ---
     with tab_history:
         st.subheader(f"📁 [{branch_name}] 최종 승인(PTW) 보존 이력")
         records = db.fetch_ptw_records(branch_name=branch_name)
@@ -1322,7 +1529,6 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
             ]
             st.dataframe(table_rows, use_container_width=True)
 
-    # --- 탭 3: 담당자 인수인계 설정 ---
     with tab_settings:
         st.subheader(f"⚙️ [{branch_name}] 안전관리자 인수인계 및 알림 수신처 설정")
         st.caption("인사이동 시 본사에 요청하지 않고 전임자가 후임자 정보와 PIN을 직접 변경할 수 있습니다.")
