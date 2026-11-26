@@ -43,8 +43,13 @@ def upload_image_to_storage(img: Image.Image, prefix: str = "before") -> str:
     img.convert("RGB").save(buf, format="JPEG", quality=82, optimize=True)
     file_bytes = buf.getvalue()
 
+    # Supabase Storage는 한글 파일명을 거부하므로 ASCII 영문·숫자만 추출
+    safe_prefix = (
+        "".join(c for c in prefix if c.isascii() and (c.isalnum() or c in ("-", "_"))).strip("_")
+        or "img"
+    )
     date_prefix = datetime.datetime.now().strftime("%Y%m%d")
-    file_path = f"{date_prefix}/{prefix}_{uuid.uuid4().hex[:10]}.jpg"
+    file_path = f"{date_prefix}/{safe_prefix}_{uuid.uuid4().hex[:10]}.jpg"
 
     sb.storage.from_(BUCKET_NAME).upload(
         path=file_path,
