@@ -45,9 +45,9 @@ st.set_page_config(
 WORK_TYPES = [
     "전력량계 검침",
     "청구서 송달/현장방문",
-    "계기 교체/전기작업",
-    "고소작업",
-    "도서/발전소 설비점검",
+    "전기작업(단전,전류제한기)",
+    "배전공사 고소작업",
+    "도서발전소 설비점검",
     "일반작업",
 ]
 
@@ -497,7 +497,7 @@ def render_worker_view(branch_name: str) -> None:
 
         c1, c2, c3 = st.columns(3)
         worker_name = c1.text_input("점검 등록 작업자 성명", placeholder="예: 홍길동")
-        zone_code = c2.text_input("지점명 / 전주번호 (현장명)", placeholder=f"예: {branch_name}-전주104호")
+        zone_code = c2.text_input("지점명 / 현장명", placeholder=f"예: {branch_name}-나주 25분구")
         work_type = c3.selectbox("공종(작업) 선택", WORK_TYPES)
 
         weight, basis = db.get_zone_weight_multiplier(branch_name, zone_code, work_type)
@@ -511,7 +511,7 @@ def render_worker_view(branch_name: str) -> None:
             st.image(before_img, caption="업로드된 개선 전 사진", width=450)
             if st.button("🤖 AI 1차 위험성평가 실행 및 중앙 DB 등록", type="primary", use_container_width=True):
                 if not zone_code.strip():
-                    st.warning("지점명 / 전주번호(현장명)를 먼저 입력해 주세요.")
+                    st.warning("지점명 / 현장명을 먼저 입력해 주세요.")
                 else:
                     with st.spinner("Gemini AI가 유해·위험요인과 감소대책을 분석 중입니다..."):
                         hazards, tbm_list = analyze_initial_hazards(
@@ -824,7 +824,7 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
             table_rows = [
                 {
                     "승인번호": r["ptw_id"],
-                    "현장/전주번호": r["zone_code"],
+                    "현장명": r["zone_code"],
                     "공종": r["work_type"],
                     "참여인원": f"{r['signer_count']}명",
                     "승인일시": r["approved_at"][:19].replace("T", " "),
@@ -880,7 +880,7 @@ def render_hq_view(branches: list[dict[str, Any]]) -> None:
                 {
                     "지점명": r["branch_name"],
                     "상태": STATUS_LABELS.get(r["status"], r["status"]),
-                    "현장/전주번호": r["zone_code"],
+                    "현장명": r["zone_code"],
                     "공종": r["work_type"],
                     "작업자": r.get("worker_name") or "-",
                     "등록시각": r["created_at"][:19].replace("T", " "),
@@ -906,14 +906,13 @@ def main() -> None:
     auth = render_sidebar_auth(branches)
     if not auth["authenticated"]:
         st.title("⚡ 한전MCS AI 위험성평가 & 작업승인(PTW)")
-        st.info("좌측 사이드바에서 소속 지점과 PIN 번호를 입력해 로그인하세요.")
+        st.info("좌측 사이드바에서 접속 모드와 소속 지점을 선택하고 PIN 번호를 입력해 로그인하세요.")
         st.markdown(
             """
-            **테스트 계정 안내 (초기 SQL 기준):**
-            * **영광지점** — 근로자 PIN: `1111` / 안전관리자 PIN: `9999`
-            * **나주지점** — 근로자 PIN: `2222` / 안전관리자 PIN: `8888`
-            * **본사 통합 관제** — 마스터 PIN: `0000`
-            * **QR코드 자동 인식 URL 예시:** `https://앱주소/?branch=영광지점`
+            **이용 안내:**
+            * **현장 작업자:** 소속 지점 QR코드를 스캔하거나 지점을 선택한 뒤 지점 공용 PIN을 입력하세요.
+            * **지점 안전관리자:** 지점 안전관리자 모드를 선택하고 전용 승인 PIN으로 로그인하세요.
+            * **PIN 분실 문의:** 각 지점 안전관리자 또는 본사 안전재난부
             """
         )
         return
