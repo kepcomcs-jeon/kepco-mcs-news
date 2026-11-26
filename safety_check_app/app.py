@@ -647,8 +647,17 @@ def render_worker_view(branch_name: str) -> None:
                     drawing_mode="freedraw",
                     key=f"sig_{rec['id']}",
                 )
-                if canvas_result.image_data is not None and canvas_result.image_data[:, :, 3].sum() > 0:
-                    sig_confirmed = True
+                if canvas_result is not None:
+                    json_data = getattr(canvas_result, "json_data", None)
+                    if isinstance(json_data, dict) and len(json_data.get("objects", [])) > 0:
+                        sig_confirmed = True
+                    else:
+                        try:
+                            if canvas_result.image_data is not None and canvas_result.image_data[:, :, 3].sum() > 0:
+                                sig_confirmed = True
+                        except Exception:
+                            pass
+
             sig_check = st.checkbox("위 유해·위험요인 및 TBM 내용을 전원 숙지하고 안전조치를 완료했음을 확인합니다.")
 
             if st.button("🛡️ 최종 작업승인(PTW) 발급 및 법정 양식 생성", type="primary", use_container_width=True):
