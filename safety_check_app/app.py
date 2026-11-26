@@ -40,11 +40,28 @@ except ImportError:
 # ==========================================
 # 페이지 기본 설정 및 상수
 # ==========================================
-COMPANY_LOGO_URL = "https://raw.githubusercontent.com/jjeonceo1-glitch/kepco-mcs-news/main/safety_check_app/app_icon.png"
+import base64
+import pathlib
+
+
+def _load_logo_data_uri() -> str:
+    """로컬 app_icon.png 파일을 읽어 비공개 저장소에서도 깨지지 않는 Data URI로 반환합니다."""
+    for candidate in (
+        pathlib.Path(__file__).resolve().parent / "app_icon.png",
+        pathlib.Path("app_icon.png"),
+        pathlib.Path("safety_check_app/app_icon.png"),
+    ):
+        if candidate.exists():
+            b64 = base64.b64encode(candidate.read_bytes()).decode("ascii")
+            return f"data:image/png;base64,{b64}"
+    return "⚡"
+
+
+COMPANY_LOGO_SRC = _load_logo_data_uri()
 
 st.set_page_config(
     page_title="한전MCS AI 위험성평가 & 작업승인(PTW)",
-    page_icon=COMPANY_LOGO_URL,
+    page_icon=COMPANY_LOGO_SRC,
     layout="wide",
 )
 st.markdown(
@@ -1020,7 +1037,7 @@ def render_sidebar_auth(branches: list[dict[str, Any]]) -> dict[str, Any]:
     st.sidebar.markdown(
         f"""
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-            <img src="{COMPANY_LOGO_URL}" alt="한전MCS"
+            <img src="{COMPANY_LOGO_SRC}" alt="한전MCS"
                  style="height: 28px; width: auto; border-radius: 6px; object-fit: contain;" />
             <span style="font-size: 17px; font-weight: 800; color: #0F172A;">한전MCS 안전 플랫폼</span>
         </div>
@@ -1722,7 +1739,7 @@ def main() -> None:
         st.markdown(
             f"""
             <div style="display: flex; align-items: center; gap: 12px; margin: 4px 0 18px 0;">
-                <img src="{COMPANY_LOGO_URL}" alt="한전MCS 로고"
+                <img src="{COMPANY_LOGO_SRC}" alt="한전MCS 로고"
                      style="height: 44px; width: auto; border-radius: 8px; object-fit: contain; flex-shrink: 0;" />
                 <div style="line-height: 1.3;">
                     <div style="font-size: 13px; font-weight: 700; color: #0052CC; letter-spacing: -0.2px;">
