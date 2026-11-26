@@ -373,3 +373,65 @@ def fetch_ptw_records(branch_name: str | None = None, limit: int = 50) -> list[d
         query = query.eq("branch_name", branch_name)
     res = query.order("approved_at", desc=True).limit(limit).execute()
     return res.data or []
+
+def _extract_storage_path(public_url: str) -> str | None:
+    """Supabase Storage 공개 URL에서 버킷 내부 파일 경로를 추출합니다."""
+    if not public_url:
+        return None
+    marker = f"/{BUCKET_NAME}/"
+    if marker not in public_url:
+        return None
+    return public_url.split(marker, 1)[1].split("?", 1)[0]
+
+
+def delete_inspection_record(inspection_id: str, branch_name: str) -> tuple[bool, str]:
+    """[지점 안전관리자] 미승인(진행 중) 중복·취소 점검 건을 안전하게 삭제합니다."""
+    sb = get_supabase_client()
+
+    # 1) 해당 지점 소속 여부 및 승인 상태 확인
+    res = (
+        sb.table("inspections")
+        .select("id, status, before_img_url, before_marked_url")
+        .eq("id", inspection_id)
+        .eq("branch_name", branch_name)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return False, "해당 지점의 점검 기록을 찾을 수 없습니다."
+
+    rec = res.data[0]
+    if rec.get("status") == "APPROVED":
+        return False, "최종 승인(PTW)이 완료된 기록은 법적 보존 의무에 따라 삭제할 수 없습니다."
+
+    # 2) 외래키 충돌 방지를 위해 연결된 보정 이력(hazard_feedback) 먼저 삭제
+    sb.table("hazard_feedback").delete().eq("inspection_id", inspection_id).execute()
+
+    # 3) 미승인 점검 기록 삭제 (자기 지점 & 미승인 조건 이중 검증)
+    del_res = (
+        sb.table("inspections")
+        .delete()
+        .eq("id", inspection_id)
+        .eq("branch_name", branch_name)
+        .neq("status", "APPROVED")
+        .execute()
+    )
+    if not del_res.data:
+        return False, "DB에서 삭제되지 않았습니다. Supabase 테이블의 DELETE 권한(RLS 정책)을 확인해 주세요."
+
+    # 4) Storage에 올라간 임시 이미지 정리 (실패해도 DB 삭제 결과 유지)
+    paths = [
+        p
+        for p in (
+            _extract_storage_path(rec.get("before_img_url") or ""),
+            _extract_storage_path(rec.get("before_marked_url") or ""),
+        )
+        if p
+    ]
+    if paths:
+        try:
+            sb.storage.from_(BUCKET_NAME).remove(paths)
+        except Exception:
+            pass
+
+    return True, "삭제 완료"

@@ -1419,12 +1419,14 @@ def render_worker_view(branch_name: str) -> None:
 # ==========================================
 def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
     st.title(f"🛡️ 지점 안전관리자 모드 — [{branch_name}]")
-    tab_review, tab_history, tab_settings = st.tabs([
+    tab_review, tab_cleanup, tab_history, tab_settings = st.tabs([
         "🚨 검토 대기함 (오탐·점수 보정)",
+        "🗑️ 진행 중 목록 정리(삭제)",
         "📁 우리 지점 PTW 승인 이력",
         "⚙️ 담당자 인수인계 설정",
     ])
 
+    # --- 탭 1: 검토 대기함 ---
     with tab_review:
         col_h, col_b = st.columns([4, 1])
         col_h.subheader(f"[{branch_name}] 고위험(상) 검토 대기 건")
@@ -1510,6 +1512,91 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
                         st.success("확정 완료! 피드백이 가중치 DB에 누적되었으며, 현장 작업자 화면이 '조치 가능' 상태로 전환되었습니다.")
                         st.rerun()
 
+    # --- 탭 2: 진행 중 목록 정리(삭제) ---
+    with tab_cleanup:
+        col_ch, col_cb = st.columns([4, 1])
+        col_ch.subheader(f"🗑️ [{branch_name}] 진행 중인 점검 건 정리 (중복·재평가 삭제)")
+        if col_cb.button("🔄 목록 새로고침", key="refresh_cleanup", use_container_width=True):
+            st.rerun()
+
+        st.caption(
+            "작업자가 재평가를 진행해 중복으로 남은 '검토 대기' 및 '조치 가능' 건을 삭제할 수 있습니다. "
+            "(※ 최종 승인 완료된 PTW 기록은 삭제 대상에서 제외됩니다.)"
+        )
+
+        in_progress = db.fetch_inspections_by_branch(
+            branch_name=branch_name,
+            statuses=["PENDING_REVIEW", "READY_FOR_ACTION"],
+            limit=100,
+        )
+        if not in_progress:
+            st.success(f"현재 [{branch_name}]에 정리할 진행 중 점검 건이 없습니다.")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "상태": STATUS_LABELS.get(r["status"], r["status"]),
+                        "현장명": r["zone_code"],
+                        "공종": r["work_type"],
+                        "작업자": r.get("worker_name") or "미입력",
+                        "등록시각": r["created_at"][:16].replace("T", " "),
+                        "ID(앞 8자리)": r["id"][:8],
+                    }
+                    for r in in_progress
+                ],
+                use_container_width=True,
+            )
+
+            del_map = {
+                f"{STATUS_LABELS.get(r['status'], r['status'])} | {r['zone_code']} ({r['work_type']}) | "
+                f"{r.get('worker_name') or '미입력'} | {r['created_at'][:16].replace('T', ' ')} [{r['id'][:8]}]": r
+                for r in in_progress
+            }
+            selected_labels = st.multiselect(
+                "삭제할 중복·취소 점검 건을 선택하세요 (복수 선택 가능)",
+                options=list(del_map.keys()),
+                key="admin_delete_targets",
+            )
+
+            if selected_labels:
+                if len(selected_labels) == 1:
+                    preview_rec = del_map[selected_labels[0]]
+                    if preview_rec.get("before_marked_url"):
+                        st.image(
+                            preview_rec["before_marked_url"],
+                            caption=f"삭제 대상 미리보기: {preview_rec['zone_code']}",
+                            width=360,
+                        )
+
+                confirm_del = st.checkbox(
+                    f"선택한 {len(selected_labels)}건의 진행 중 점검 기록을 영구 삭제합니다. (복구 불가)",
+                    key="confirm_admin_delete",
+                )
+                if st.button(
+                    f"🗑️ 선택한 {len(selected_labels)}건 영구 삭제",
+                    type="primary",
+                    disabled=not confirm_del,
+                    use_container_width=True,
+                ):
+                    deleted_cnt = 0
+                    errors: list[str] = []
+                    with st.spinner("선택한 점검 기록을 삭제 중입니다..."):
+                        for label in selected_labels:
+                            target = del_map[label]
+                            ok, msg = db.delete_inspection_record(target["id"], branch_name)
+                            if ok:
+                                deleted_cnt += 1
+                            else:
+                                errors.append(f"[{target['zone_code']}] {msg}")
+
+                    if deleted_cnt:
+                        st.success(f"{deleted_cnt}건의 진행 중 점검 기록을 삭제했습니다.")
+                    for err in errors:
+                        st.error(err)
+                    if deleted_cnt:
+                        st.rerun()
+
+    # --- 탭 3: 우리 지점 승인 이력 ---
     with tab_history:
         st.subheader(f"📁 [{branch_name}] 최종 승인(PTW) 보존 이력")
         records = db.fetch_ptw_records(branch_name=branch_name)
@@ -1529,6 +1616,7 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
             ]
             st.dataframe(table_rows, use_container_width=True)
 
+    # --- 탭 4: 담당자 인수인계 설정 ---
     with tab_settings:
         st.subheader(f"⚙️ [{branch_name}] 안전관리자 인수인계 및 알림 수신처 설정")
         st.caption("인사이동 시 본사에 요청하지 않고 전임자가 후임자 정보와 PIN을 직접 변경할 수 있습니다.")
