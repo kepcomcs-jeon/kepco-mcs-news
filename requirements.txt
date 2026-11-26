@@ -9,3 +9,5 @@ pytz
 python-docx
 streamlit-drawable-canvas
 numpy
+supabase
+requests
