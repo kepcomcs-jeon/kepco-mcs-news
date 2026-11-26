@@ -10,7 +10,11 @@ import os
 from typing import Any
 
 from docx import Document
-from docx.shared import Inches
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt, RGBColor
 from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -42,6 +46,8 @@ st.set_page_config(
     layout="wide",
 )
 
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
 WORK_TYPES = [
     "전력량계 검침",
     "청구서 송달/현장방문",
@@ -58,8 +64,12 @@ STATUS_LABELS = {
 }
 
 
+def now_kst() -> datetime.datetime:
+    return datetime.datetime.now(KST)
+
+
 # ==========================================
-# AI / 이미지 / 법정 양식 유틸리티 함수
+# AI / 이미지 / 서명 추출 유틸리티 함수
 # ==========================================
 def get_gemini_client() -> genai.Client:
     api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
@@ -119,6 +129,105 @@ def draw_hazard_markers(img: Image.Image, hazards: list[dict[str, Any]]) -> Imag
     return marked
 
 
+def extract_signature_png_bytes(
+    canvas_result: Any, width: int = 380, height: int = 140
+) -> bytes | None:
+    """st_canvas 결과에서 자필 서명 PNG 바이트를 추출합니다 (image_data 오류 시 json_data로 자동 렌더링)."""
+    if canvas_result is None:
+        return None
+
+    json_data = getattr(canvas_result, "json_data", None)
+    has_json_objects = isinstance(json_data, dict) and len(json_data.get("objects", [])) > 0
+
+    # 1순위: image_data가 정상 반환되는 환경
+    try:
+        arr = canvas_result.image_data
+        if arr is not None:
+            ink_mask = (arr[:, :, :3] < 235).any(axis=2) & (arr[:, :, 3] > 0)
+            if ink_mask.any():
+                ys, xs = ink_mask.nonzero()
+                pad = 14
+                top = max(0, int(ys.min()) - pad)
+                bottom = min(arr.shape[0], int(ys.max()) + pad)
+                left = max(0, int(xs.min()) - pad)
+                right = min(arr.shape[1], int(xs.max()) + pad)
+
+                img = Image.fromarray(arr.astype("uint8"), mode="RGBA")
+                bg = Image.new("RGB", img.size, (245, 246, 248))
+                bg.paste(img, mask=img.split()[3])
+                if right > left + 5 and bottom > top + 5:
+                    bg = bg.crop((left, top, right, bottom))
+                buf = io.BytesIO()
+                bg.save(buf, format="PNG")
+                return buf.getvalue()
+    except Exception:
+        pass
+
+    # 2순위: Streamlit Cloud 등에서 RuntimeError 발생 시 json_data(Fabric.js path)로 직접 렌더링
+    if not has_json_objects:
+        return None
+
+    img = Image.new("RGB", (width, height), (245, 246, 248))
+    draw = ImageDraw.Draw(img)
+    all_pts: list[tuple[float, float]] = []
+
+    for obj in json_data.get("objects", []):
+        if obj.get("type") != "path":
+            continue
+        stroke_w = max(3, int(obj.get("strokeWidth", 3)))
+        path_cmds = obj.get("path", [])
+        pts: list[tuple[float, float]] = []
+        cur_x, cur_y = 0.0, 0.0
+
+        for cmd in path_cmds:
+            if not cmd:
+                continue
+            op = cmd[0]
+            if op in ("M", "L") and len(cmd) >= 3:
+                cur_x, cur_y = float(cmd[1]), float(cmd[2])
+                pts.append((cur_x, cur_y))
+            elif op == "Q" and len(cmd) >= 5:
+                cx, cy, nx, ny = float(cmd[1]), float(cmd[2]), float(cmd[3]), float(cmd[4])
+                for step in range(1, 6):
+                    t = step / 5.0
+                    px = ((1 - t) ** 2) * cur_x + 2 * (1 - t) * t * cx + (t ** 2) * nx
+                    py = ((1 - t) ** 2) * cur_y + 2 * (1 - t) * t * cy + (t ** 2) * ny
+                    pts.append((px, py))
+                cur_x, cur_y = nx, ny
+            elif op == "C" and len(cmd) >= 7:
+                c1x, c1y, c2x, c2y, nx, ny = (
+                    float(cmd[1]), float(cmd[2]), float(cmd[3]),
+                    float(cmd[4]), float(cmd[5]), float(cmd[6]),
+                )
+                for step in range(1, 7):
+                    t = step / 6.0
+                    px = ((1 - t) ** 3) * cur_x + 3 * ((1 - t) ** 2) * t * c1x + 3 * (1 - t) * (t ** 2) * c2x + (t ** 3) * nx
+                    py = ((1 - t) ** 3) * cur_y + 3 * ((1 - t) ** 2) * t * c1y + 3 * (1 - t) * (t ** 2) * c2y + (t ** 3) * ny
+                    pts.append((px, py))
+                cur_x, cur_y = nx, ny
+
+        if len(pts) >= 2:
+            draw.line(pts, fill=(15, 15, 15), width=stroke_w)
+            all_pts.extend(pts)
+
+    if not all_pts:
+        return None
+
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    pad = 16
+    left = max(0, int(min(xs)) - pad)
+    top = max(0, int(min(ys)) - pad)
+    right = min(width, int(max(xs)) + pad)
+    bottom = min(height, int(max(ys)) + pad)
+    if right > left + 8 and bottom > top + 8:
+        img = img.crop((left, top, right, bottom))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def analyze_initial_hazards(
     img: Image.Image,
     branch_name: str,
@@ -130,7 +239,7 @@ def analyze_initial_hazards(
     client = get_gemini_client()
     prompt = f"""
 당신은 대한민국 산업안전보건법(고용노동부 고시 제2024-76호) 기준의 베테랑 전기·현장 안전관리자입니다.
-첨부된 작업 전 현장 사진을 정밀 분석하여 유해·위험요인(최대 5개)과 핵심 TBM(작업 전 안전점검회의) 전달사항 3가지를 도출하세요.
+첨부된 작업 전 현장 사진을 정밀 분석하여 유해·위험요인(최대 5개)과 핵심 TBM(작업 전 안전점검회의) 전달사항 3~4가지를 도출하세요.
 
 [현장 정보]
 - 지점명: {branch_name}
@@ -142,8 +251,9 @@ def analyze_initial_hazards(
   "hazards": [
     {{
       "id": 1,
-      "hazard_name": "구체적인 유해·위험요인 명칭 (예: 개폐기 인근 노출 충전부 접촉 위험)",
-      "accident_type": "재해유형 (감전, 추락, 전도, 협착, 충돌, 낙하 등)",
+      "hazard_name": "사진에서 보이는 구체적인 유해·위험요인 (예: 노후 전력량계함 배선 노출부 접촉에 의한 감전 위험)",
+      "accident_type": "재해형태 (예: 감전, 추락, 넘어짐(전도), 낙하·비래/부딪힘, 협착 등)",
+      "current_measure": "사진상 확인되는 현재 조치 상태 (예: 일반 작업복 및 작업 장갑 착용 상태, 육안 주의에 의존 등)",
       "frequency": 3,
       "severity": 4,
       "countermeasure": "작업자가 즉시 실행하고 사진으로 증명할 수 있는 구체적 감소대책",
@@ -183,6 +293,7 @@ def analyze_initial_hazards(
             "id": idx,
             "hazard_name": h.get("hazard_name", f"위험요인 {idx}"),
             "accident_type": h.get("accident_type", "기타"),
+            "current_measure": h.get("current_measure", "현장 육안 확인 필요"),
             "frequency": freq,
             "severity": sev,
             "ai_raw_score": ai_raw,
@@ -295,6 +406,12 @@ def render_hazard_cards(hazards: list[dict[str, Any]]) -> None:
         grade = h.get("grade", "중")
         badge = "🔴 상" if grade == "상" else ("🟠 중" if grade == "중" else "🔵 하")
         border_color = "#DC2626" if grade == "상" else ("#EA580C" if grade == "중" else "#2563EB")
+        cur_m = h.get("current_measure", "")
+        cur_html = (
+            f'<div style="font-size: 13px; color: #475569; margin-bottom: 3px;">🔎 <b>현재 조치:</b> {cur_m}</div>'
+            if cur_m
+            else ""
+        )
         st.markdown(
             f"""
             <div style="padding: 12px 15px; border-radius: 8px; border-left: 5px solid {border_color};
@@ -302,6 +419,7 @@ def render_hazard_cards(hazards: list[dict[str, Any]]) -> None:
                 <div style="font-weight: bold; font-size: 15px; margin-bottom: 4px;">
                     #{h['id']} [{badge} / {h['final_score']}점] {h['hazard_name']} ({h.get('accident_type', '')})
                 </div>
+                {cur_html}
                 <div style="font-size: 14px; color: #334155;">
                     👉 <b>필수 감소대책:</b> {h['countermeasure']}
                 </div>
@@ -320,9 +438,104 @@ def capture_image_widget(key_prefix: str, label: str) -> Image.Image | None:
     )
     if up_file is not None:
         img = Image.open(up_file)
-        img = ImageOps.exif_transpose(img)  # 스마트폰 촬영 사진 자동 정방향 보정
+        img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
     return None
+
+
+# ==========================================
+# 법정 '현장 위험성 평가표' DOCX 생성 유틸리티
+# ==========================================
+def _set_font(run, size: float = 9.0, bold: bool = False, color: tuple[int, int, int] | None = None) -> None:
+    run.font.name = "맑은 고딕"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "맑은 고딕")
+    run.font.size = Pt(size)
+    run.bold = bold
+    if color:
+        run.font.color.rgb = RGBColor(*color)
+
+
+def _set_cell_shading(cell, fill_hex: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill_hex)
+    tc_pr.append(shd)
+
+
+def _set_cell_margins(cell, top: int = 55, bottom: int = 55, left: int = 85, right: int = 85) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_mar = OxmlElement("w:tcMar")
+    for side, val in (("top", top), ("bottom", bottom), ("left", left), ("right", right)):
+        node = OxmlElement(f"w:{side}")
+        node.set(qn("w:w"), str(val))
+        node.set(qn("w:type"), "dxa")
+        tc_mar.append(node)
+    tc_pr.append(tc_mar)
+
+
+def _set_table_borders(table, color: str = "B8C2CC", sz: str = "4") -> None:
+    tbl_pr = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), sz)
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), color)
+        borders.append(el)
+    tbl_pr.append(borders)
+
+
+def _write_cell(
+    cell,
+    text: str,
+    size: float = 8.4,
+    bold: bool = False,
+    align: WD_ALIGN_PARAGRAPH = WD_ALIGN_PARAGRAPH.LEFT,
+    bg: str | None = None,
+    color: tuple[int, int, int] | None = None,
+) -> None:
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    _set_cell_margins(cell)
+    if bg:
+        _set_cell_shading(cell, bg)
+    p = cell.paragraphs[0]
+    p.alignment = align
+    p.paragraph_format.space_before = Pt(1)
+    p.paragraph_format.space_after = Pt(1)
+    run = p.add_run(text)
+    _set_font(run, size=size, bold=bold, color=color)
+
+
+def _append_sig_image(paragraph, sig_png_bytes: bytes | None, width_cm: float = 1.45) -> None:
+    if not sig_png_bytes:
+        return
+    run = paragraph.add_run()
+    run.add_picture(io.BytesIO(sig_png_bytes), width=Cm(width_cm))
+
+
+def _set_col_widths(table, widths_cm: list[float]) -> None:
+    table.autofit = False
+    for row in table.rows:
+        for idx, w in enumerate(widths_cm):
+            if idx < len(row.cells):
+                row.cells[idx].width = Cm(w)
+
+
+def _add_doc_heading(doc: Document, title: str) -> None:
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(10)
+    p.paragraph_format.space_after = Pt(4)
+    _set_font(p.add_run(title), size=11, bold=True, color=(15, 44, 89))
+
+
+def _add_doc_note(doc: Document, text: str) -> None:
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(3)
+    p.paragraph_format.space_after = Pt(4)
+    _set_font(p.add_run(text), size=7.8, color=(80, 88, 98))
 
 
 def build_legal_ptw_docx(
@@ -339,68 +552,316 @@ def build_legal_ptw_docx(
     integrity_hash: str,
     before_marked_img: Image.Image | None = None,
     after_img: Image.Image | None = None,
+    sig_png_bytes: bytes | None = None,
+    eval_dt: datetime.datetime | None = None,
 ) -> bytes:
-    """산업안전보건법 고시 제2024-76호 기반 위험성평가표 및 작업승인서(PTW) 워드 문서 생성."""
+    """고용노동부고시 제2024-76호 기준 '현장 위험성 평가표' + PTW 이행 검증 워드 문서 생성."""
     doc = Document()
-    doc.add_heading("AI 기반 수시 위험성평가 및 작업승인서 (PTW)", level=1)
-    doc.add_paragraph(f"승인번호: {ptw_id} | 발급일시: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    for sec in doc.sections:
+        sec.page_width = Cm(21.0)
+        sec.page_height = Cm(29.7)
+        sec.top_margin = Cm(1.4)
+        sec.bottom_margin = Cm(1.4)
+        sec.left_margin = Cm(1.5)
+        sec.right_margin = Cm(1.5)
 
-    # 표 1: 현장 기본정보
-    t1 = doc.add_table(rows=4, cols=2)
-    t1.style = "Table Grid"
-    rows_info = [
-        ("소속 지점 / 현장(전주번호)", f"{branch_name} / {zone_code}"),
-        ("공종 (작업명)", work_type),
-        ("현장 위치 (GPS)", f"{address} ({gps_coords})"),
-        ("검증 결과 / 참여 근로자", f"승인 통과 (해소율 {verification.get('resolution_rate', 0)}%) / {', '.join(signers)}"),
+    dt = eval_dt or now_kst()
+    dt_full = dt.strftime("%Y. %m. %d. %H:%M")
+    dt_date = dt.strftime("%Y. %m. %d.")
+
+    active = [h for h in (hazards or []) if not h.get("excluded", False)]
+    cnt_all = len(active)
+    cnt_high = sum(1 for h in active if h.get("grade") == "상")
+    cnt_mid = sum(1 for h in active if h.get("grade") == "중")
+    cnt_low = sum(1 for h in active if h.get("grade") == "하")
+
+    signer_display = ", ".join(signers) if signers else ""
+
+    # 평가 대상(GPS 좌표 및 현장명) 포맷팅
+    target_lines: list[str] = []
+    if gps_coords and "," in gps_coords:
+        lat_s, lon_s = [p.strip() for p in gps_coords.split(",", 1)]
+        target_lines.append(f"위도: {lat_s}, 경도: {lon_s}")
+    elif gps_coords:
+        target_lines.append(gps_coords)
+    if address:
+        target_lines.append(address)
+    if zone_code:
+        target_lines.append(f"{zone_code} ({work_type})")
+    target_text = "\n".join(target_lines) if target_lines else work_type
+
+    # ---- 문서 제목 ----
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_title.paragraph_format.space_after = Pt(2)
+    _set_font(p_title.add_run("현장 위험성 평가표"), size=17, bold=True, color=(15, 44, 89))
+
+    p_sub = doc.add_paragraph()
+    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_sub.paragraph_format.space_after = Pt(8)
+    _set_font(
+        p_sub.add_run("사업장 위험성평가에 관한 지침(고용노동부고시 제2024-76호)의 절차를 따름"),
+        size=8.5,
+        color=(90, 98, 110),
+    )
+
+    # ---- 상단 기본정보표 (4x4) ----
+    meta_tbl = doc.add_table(rows=4, cols=4)
+    meta_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(meta_tbl)
+
+    branch_display = f"[{branch_name}]" if branch_name else "[          지점]"
+    photo_method = "현장점검·사진 2장(전·후)" if after_img is not None else "현장점검·사진 1장"
+
+    meta_rows = [
+        ("사업장", branch_display, "평가 일시", dt_full),
+        ("평가 대상", target_text, "평가 종류", "□ 최초 □ 수시\n□ 정기 □ 상시"),
+        ("평가 방법", photo_method, "평가 결과", f"{cnt_all}건, 상 {cnt_high}·중 {cnt_mid}·하 {cnt_low}"),
+        ("평가 책임자", "          (서명)", "참여 근로자", ""),
     ]
-    for idx, (k, v) in enumerate(rows_info):
-        t1.cell(idx, 0).text = k
-        t1.cell(idx, 1).text = str(v)
+    for r_idx, (k1, v1, k2, v2) in enumerate(meta_rows):
+        _write_cell(meta_tbl.cell(r_idx, 0), k1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+        _write_cell(meta_tbl.cell(r_idx, 1), v1)
+        _write_cell(meta_tbl.cell(r_idx, 2), k2, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+        if r_idx < 3:
+            _write_cell(meta_tbl.cell(r_idx, 3), v2)
+        else:
+            c_worker = meta_tbl.cell(3, 3)
+            _write_cell(c_worker, f"{signer_display}\n{dt_date}" if signer_display else dt_date, size=8.4)
+            if sig_png_bytes:
+                p_sig = c_worker.add_paragraph()
+                p_sig.paragraph_format.space_before = Pt(2)
+                p_sig.paragraph_format.space_after = Pt(1)
+                _append_sig_image(p_sig, sig_png_bytes, width_cm=1.5)
+    _set_col_widths(meta_tbl, [2.8, 6.2, 2.8, 6.2])
 
-    # 표 2: 유해·위험요인 및 개선 검증 결과
-    doc.add_heading("1. 유해·위험요인 파악 및 개선 전·후 AI 검증 내역", level=2)
-    active = [h for h in hazards if not h.get("excluded", False)]
-    ver_map = {v["id"]: v for v in verification.get("items", [])}
-    t2 = doc.add_table(rows=1 + len(active), cols=5)
-    t2.style = "Table Grid"
-    headers = ["번호", "유해·위험요인", "등급/점수", "필수 감소대책", "개선 후 AI 검증"]
-    for c, text in enumerate(headers):
-        t2.cell(0, c).text = text
+    # ---- 1. 사업장 위험성 평가 절차 ----
+    _add_doc_heading(doc, "1. 사업장 위험성 평가 절차")
+    proc_tbl = doc.add_table(rows=7, cols=3)
+    proc_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(proc_tbl)
+
+    for c_idx, head in enumerate(["절차", "AI 판독", "평가 책임자 확인"]):
+        _write_cell(proc_tbl.cell(0, c_idx), head, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+
+    proc_rows = [
+        ("가. 사전준비(제9조)", "위험성 수준 기준 기본안", "위험성의 수준과 그 수준을 판단하는 기준, 허용 가능한 위험성의 수준을 확정(제2항)"),
+        ("나. 유해·위험요인 파악(제10조)", f"현장점검(제10조 제1호)간 첨부된 사진에서 {cnt_all}건", "사진에 포함되지 않은 현장 위험물(화학물질·소음·중량물 등)과 근로자가 제안한 위험요인도 추가하여 파악"),
+        ("다. 위험성 결정(제11조)", "상·중·하 수준으로 분류", "허용 가능한지 결정, 현장 근로자 참여(제6조)"),
+        ("라. 위험성 감소대책 수립·실행(제12조)", "감소대책 수립(제거·대체 → 공학적 대책 → 관리적 대책 → 보호구 착용)", "감소대책에 대한 담당자 및 완료일 작성, 실행 후 위험성 수준 재확인"),
+        ("마. 공유(제13조)", "작업 전 위험요인과 감소대책을 공유", "작업 전 안전점검회의(TBM)에서 공유하고 서명"),
+        ("바. 기록·보존(제14조)", "본 문서", "서명한 본 문서를 보관"),
+    ]
+    for idx, (col1, col2, col3) in enumerate(proc_rows, start=1):
+        _write_cell(proc_tbl.cell(idx, 0), col1, size=8.1, bold=True)
+        _write_cell(proc_tbl.cell(idx, 1), col2, size=8.1)
+        _write_cell(proc_tbl.cell(idx, 2), col3, size=8.1)
+    _set_col_widths(proc_tbl, [4.3, 5.7, 8.0])
+
+    _add_doc_note(
+        doc,
+        "※ 평가 책임자는 제10조의 사업장 순회점검을 통해 유해·위험요인을 발굴, 제11조의 위험성 결정 및 "
+        "제12조의 위험성 감소대책을 수립·실행 할 것.(사업장 위험성 평가에 관한 지침 제15조 제4항)",
+    )
+
+    # ---- 2. 법적 의무 ----
+    _add_doc_heading(doc, "2. 법적 의무")
+    law_tbl = doc.add_table(rows=4, cols=4)
+    law_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(law_tbl)
+
+    for c_idx, head in enumerate(["의무", "조문", "과태료", "비고"]):
+        _write_cell(law_tbl.cell(0, c_idx), head, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+
+    law_rows = [
+        ("위험성평가 실시", "제36조 제1항", "1천만원 이하", "위험성평가표 전체"),
+        ("근로자의 참여\n근로자대표 참여\n결과 알림", "제36조 제2항ㆍ제3항ㆍ제4항 전단", "500만원 이하", "참여 근로자 서명\n작업 전 공유"),
+        ("결과 기록·보존", "제36조 제5항", "300만원 이하", "서명된 본 평가표 보관"),
+    ]
+    for idx, row_vals in enumerate(law_rows, start=1):
+        for c_idx, val in enumerate(row_vals):
+            align = WD_ALIGN_PARAGRAPH.CENTER if c_idx in (1, 2) else WD_ALIGN_PARAGRAPH.LEFT
+            _write_cell(law_tbl.cell(idx, c_idx), val, size=8.1, align=align)
+    _set_col_widths(law_tbl, [4.2, 4.8, 3.0, 6.0])
+
+    _add_doc_note(
+        doc,
+        "※ 과태료 시행 : 상시 50명 이상(건설업은 공사 금액 50억원 이상) 2027년 1월 1일 시행(산업안전보건법 부칙 제1조). "
+        "중대재해로 이어질 수 있는 위험은 작업 전 안전점검회의(TBM) 등을 통해 상시 알리도록 노력해야 합니다(제36조 제4항 후단).",
+    )
+
+    # ---- 3. 위험성 수준 기준(AI 기준) ----
+    _add_doc_heading(doc, "3. 위험성 수준 기준(AI 기준)")
+    std_tbl = doc.add_table(rows=6, cols=4)
+    std_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(std_tbl)
+
+    for c_idx, head in enumerate(["수준", "기준 제시", "판단", "조치"]):
+        _write_cell(std_tbl.cell(0, c_idx), head, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+
+    std_rows = [
+        ("상", "사망 또는 영구 장애를 초래할 수 있는 고위험 요인이 존재하거나, 다수의 위험에 동시 노출되어 즉시 작업 중단이 필요한 상태", "허용 불가", "즉시 작업을 중지하고 위험 요인 제거 및 현장 안전조치(보호구 완비, 통로 확보 등) 후 재작업", "FEE4E2", (180, 35, 24)),
+        ("중", "휴업을 수반하는 부상(골절, 감전, 열상 등)이 발생할 가능성이 높은 유해·위험요인이 존재하는 상태", "허용 불가", "작업 전 안전보호구 착용 및 환경 개선(장애물 정리, 안전거리 유지 등) 후 작업 실시", "FEF0C7", (181, 71, 8)),
+        ("하", "경미한 부상(찰과상, 단순 타박상 등) 발생 가능성이 있으나 통상적인 주의로 예방 가능한 상태", "허용 가능", "기본 안전수칙 준수 및 상시 주의력 유지", "D1FADF", (2, 122, 72)),
+    ]
+    for idx, (lvl, desc, judge, act, bg_hex, txt_col) in enumerate(std_rows, start=1):
+        _write_cell(std_tbl.cell(idx, 0), lvl, size=8.4, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg=bg_hex, color=txt_col)
+        _write_cell(std_tbl.cell(idx, 1), desc, size=8.1)
+        _write_cell(std_tbl.cell(idx, 2), judge, size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+        _write_cell(std_tbl.cell(idx, 3), act, size=8.1)
+
+    _write_cell(std_tbl.cell(4, 0), "판단 근거", size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+    merged_basis = std_tbl.cell(4, 1).merge(std_tbl.cell(4, 3))
+    _write_cell(
+        merged_basis,
+        "산업안전보건법 제36조(위험성평가의 실시), 산업안전보건기준에 관한 규칙 제32조(보호구의 지급 등), 제301조(전기 기계·기구 등의 유지관리)",
+        size=8.1,
+    )
+
+    merged_confirm = std_tbl.cell(5, 0).merge(std_tbl.cell(5, 3))
+    _write_cell(
+        merged_confirm,
+        f"위 판독 기준으로 정함.     참여 근로자: {signer_display}   ",
+        size=8.4,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.RIGHT,
+        bg="F8FAFC",
+    )
+    _append_sig_image(merged_confirm.paragraphs[0], sig_png_bytes, width_cm=1.4)
+    _set_col_widths(std_tbl, [1.8, 7.2, 2.2, 6.8])
+
+    # ---- 4. AI 판독 ----
+    _add_doc_heading(doc, "4. AI 판독")
+    _add_doc_note(doc, "※ 사진에 표시된 원과 번호는 아래 '위험성 평가표'의 번호와 일치합니다.")
+    if before_marked_img is not None:
+        b_buf = io.BytesIO()
+        before_marked_img.convert("RGB").save(b_buf, format="JPEG", quality=85)
+        b_buf.seek(0)
+        p_img = doc.add_paragraph()
+        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_img.add_run().add_picture(b_buf, width=Cm(15.5))
+
+    # ---- 4-1. 위험성 평가표(AI 분석) ----
+    _add_doc_heading(doc, "4-1. 위험성 평가표(AI 분석)")
+    hz_tbl = doc.add_table(rows=1 + len(active), cols=7)
+    hz_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(hz_tbl)
+
+    hz_headers = [
+        "번호",
+        "유해·위험요인\n(사진에서 보이는 것)",
+        "재해형태",
+        "현재 조치",
+        "위험\n수준",
+        "감소 대책(제12조)",
+        "담당\n완료일",
+    ]
+    for c_idx, head in enumerate(hz_headers):
+        _write_cell(hz_tbl.cell(0, c_idx), head, size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
 
     for r_idx, h in enumerate(active, start=1):
-        v = ver_map.get(h["id"], {})
-        status_str = "✅ 해소" if v.get("resolved") else "❌ 미조치"
-        t2.cell(r_idx, 0).text = str(h["id"])
-        t2.cell(r_idx, 1).text = h["hazard_name"]
-        t2.cell(r_idx, 2).text = f"{h['grade']} ({h['final_score']}점)"
-        t2.cell(r_idx, 3).text = h["countermeasure"]
-        t2.cell(r_idx, 4).text = f"{status_str} - {v.get('reason', '')}"
+        grade = str(h.get("grade", "중"))
+        grade_bg = "FEE4E2" if grade == "상" else ("FEF0C7" if grade == "중" else "D1FADF")
+        grade_col = (180, 35, 24) if grade == "상" else ((181, 71, 8) if grade == "중" else (2, 122, 72))
 
-    # TBM 전달사항
-    if tbm_list:
-        doc.add_heading("2. 작업 전 안전점검회의 (TBM) 핵심 전달사항", level=2)
-        for pt in tbm_list:
-            doc.add_paragraph(f"• {pt}")
+        _write_cell(hz_tbl.cell(r_idx, 0), str(h.get("id", r_idx)), size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+        _write_cell(hz_tbl.cell(r_idx, 1), str(h.get("hazard_name", "")), size=7.9)
+        _write_cell(hz_tbl.cell(r_idx, 2), str(h.get("accident_type", "-")), size=7.9, align=WD_ALIGN_PARAGRAPH.CENTER)
+        _write_cell(hz_tbl.cell(r_idx, 3), str(h.get("current_measure") or "현장 확인 필요"), size=7.9)
+        _write_cell(hz_tbl.cell(r_idx, 4), grade, size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg=grade_bg, color=grade_col)
+        _write_cell(hz_tbl.cell(r_idx, 5), str(h.get("countermeasure", "")), size=7.9)
 
-    # 사진 증빙 첨부
-    doc.add_heading("3. 개선 전·후 현장 사진 증빙", level=2)
-    if before_marked_img is not None:
-        doc.add_paragraph("[개선 전 - 위험요인 번호 마킹]")
-        b_buf = io.BytesIO()
-        before_marked_img.save(b_buf, format="JPEG", quality=80)
-        b_buf.seek(0)
-        doc.add_picture(b_buf, width=Inches(4.5))
+        c_done = hz_tbl.cell(r_idx, 6)
+        _write_cell(c_done, f"{signer_display}\n{dt_date}" if signer_display else dt_date, size=7.7, align=WD_ALIGN_PARAGRAPH.CENTER)
+        if sig_png_bytes:
+            p_row_sig = c_done.add_paragraph()
+            p_row_sig.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_row_sig.paragraph_format.space_before = Pt(2)
+            _append_sig_image(p_row_sig, sig_png_bytes, width_cm=1.35)
+    _set_col_widths(hz_tbl, [1.0, 4.3, 1.9, 2.5, 1.2, 4.9, 2.2])
+
+    # ---- 5. 안전점검회의(TBM) 공유 ----
+    _add_doc_heading(doc, "5. 안전점검회의(TBM) 공유")
+    for idx, pt in enumerate(tbm_list or [], start=1):
+        clean_pt = str(pt).strip()
+        if not clean_pt:
+            continue
+        p_tbm = doc.add_paragraph()
+        p_tbm.paragraph_format.space_before = Pt(1)
+        p_tbm.paragraph_format.space_after = Pt(2)
+        prefix = "" if clean_pt[:2].rstrip(".").isdigit() else f"{idx}. "
+        _set_font(p_tbm.add_run(f"{prefix}{clean_pt}"), size=8.4)
+
+    tbm_tbl = doc.add_table(rows=2, cols=3)
+    tbm_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(tbm_tbl)
+    for c_idx, head in enumerate(["공유 일시", "공유한 사람 (평가 책임자)", "참석자 서명 (근로자)"]):
+        _write_cell(tbm_tbl.cell(0, c_idx), head, size=8.2, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+
+    _write_cell(tbm_tbl.cell(1, 0), dt_full, size=8.2, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _write_cell(tbm_tbl.cell(1, 1), "          (서명)", size=8.2, align=WD_ALIGN_PARAGRAPH.CENTER)
+    c_tbm_sig = tbm_tbl.cell(1, 2)
+    _write_cell(c_tbm_sig, f"{signer_display}  ", size=8.2, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _append_sig_image(c_tbm_sig.paragraphs[0], sig_png_bytes, width_cm=1.5)
+    _set_col_widths(tbm_tbl, [5.0, 6.5, 6.5])
+
+    _add_doc_note(
+        doc,
+        "※ 이 문서는 초안입니다. 유해·위험요인은 본 AI 모델이 사진에서 분석한 결과이고, 위험성 수준과 감소대책 후보는 "
+        "코드가 정해진 규칙으로 고른 것입니다. 허용 가능 여부의 결정, 대책 선택과 실행, 근로자 참여는 관리자가 시행합니다."
+        "(사업장 위험성 평가에 관한 지침 제6조·제11조·제12조)",
+    )
+    _add_doc_note(
+        doc,
+        "※ 사진에 보이지 않는 위험(화학물질 소음 분진·중량물 취급 작업 자세 등)은 이 표에 들어 있지 않습니다. 파악 단계에서 추가 작성해 주세요.",
+    )
+
+    # ---- 6. 안전조치 이행 검증 및 작업승인(PTW) 기록 ----
+    _add_doc_heading(doc, "6. 안전조치 이행 검증 및 작업승인(PTW) 기록")
+    ptw_tbl = doc.add_table(rows=3, cols=2)
+    ptw_tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_table_borders(ptw_tbl)
+    ptw_info_rows = [
+        ("PTW 승인번호 / 일시", f"{ptw_id} ({dt_full})"),
+        (
+            "2차 AI 개선 전·후 검증",
+            f"승인 통과 (전체 해소율 {verification.get('resolution_rate', 0)}%, "
+            f"고위험 {verification.get('high_resolved', 0)}/{verification.get('high_total', 0)} 해소)",
+        ),
+        ("위·변조 방지 해시(SHA-256)", integrity_hash),
+    ]
+    for r_idx, (k, v) in enumerate(ptw_info_rows):
+        _write_cell(ptw_tbl.cell(r_idx, 0), k, size=8.1, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, bg="EEF2F7")
+        _write_cell(ptw_tbl.cell(r_idx, 1), str(v), size=8.0)
+    _set_col_widths(ptw_tbl, [4.6, 13.4])
+
+    ver_items = verification.get("items", [])
+    if ver_items:
+        p_ver = doc.add_paragraph()
+        p_ver.paragraph_format.space_before = Pt(5)
+        p_ver.paragraph_format.space_after = Pt(2)
+        _set_font(p_ver.add_run("[항목별 개선 후 AI 검증 판정]"), size=8.4, bold=True)
+        for item in ver_items:
+            mark = "해소" if item.get("resolved") else "미조치"
+            p_item = doc.add_paragraph()
+            p_item.paragraph_format.space_before = Pt(1)
+            p_item.paragraph_format.space_after = Pt(1)
+            _set_font(
+                p_item.add_run(f"• #{item.get('id')} [{item.get('grade')}] {mark} - {item.get('reason', '')}"),
+                size=8.0,
+            )
+
     if after_img is not None:
-        doc.add_paragraph("[개선 후 - 안전조치 완료 검증]")
+        p_cap = doc.add_paragraph()
+        p_cap.paragraph_format.space_before = Pt(6)
+        p_cap.paragraph_format.space_after = Pt(3)
+        _set_font(p_cap.add_run("[개선 후 현장 사진 - 안전조치 완료 증빙]"), size=8.4, bold=True)
         a_buf = io.BytesIO()
-        after_img.save(a_buf, format="JPEG", quality=80)
+        after_img.convert("RGB").save(a_buf, format="JPEG", quality=85)
         a_buf.seek(0)
-        doc.add_picture(a_buf, width=Inches(4.5))
-
-    # 무결성 해시 기록
-    doc.add_heading("4. 법적 증빙 및 위변조 방지 해시 (SHA-256)", level=2)
-    doc.add_paragraph(f"SHA-256: {integrity_hash}")
+        p_after = doc.add_paragraph()
+        p_after.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_after.add_run().add_picture(a_buf, width=Cm(14.5))
 
     out = io.BytesIO()
     doc.save(out)
@@ -550,6 +1011,22 @@ def render_worker_view(branch_name: str) -> None:
 
     # --- 탭 2: 조치 완료 및 PTW 발급 ---
     with tab_action:
+        # 방금 발급 완료된 평가표 다운로드 영역 유지
+        if "last_ptw_download" in st.session_state:
+            dl = st.session_state["last_ptw_download"]
+            st.success(f"🎉 작업승인(PTW) 발급 완료! 승인번호: **{dl['ptw_id']}**")
+            st.code(f"위변조 방지 해시(SHA-256): {dl['integrity_hash']}")
+            st.download_button(
+                label="📥 현장 위험성 평가표 & PTW 워드문서(.docx) 다운로드",
+                data=dl["docx_bytes"],
+                file_name=dl["file_name"],
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                type="primary",
+                use_container_width=True,
+                key=f"dl_btn_{dl['ptw_id']}",
+            )
+            st.markdown("---")
+
         col_title, col_ref = st.columns([4, 1])
         col_title.subheader(f"📋 [{branch_name}] 진행 중인 점검 목록")
         if col_ref.button("🔄 상태 새로고침", use_container_width=True):
@@ -635,6 +1112,7 @@ def render_worker_view(branch_name: str) -> None:
                 placeholder="예: 홍길동, 김철수, 이영희",
             )
             sig_confirmed = False
+            canvas_result = None
             if st_canvas is not None:
                 st.caption("대표 작업자 자필 서명")
                 canvas_result = st_canvas(
@@ -653,7 +1131,7 @@ def render_worker_view(branch_name: str) -> None:
                         sig_confirmed = True
                     else:
                         try:
-                            if canvas_result.image_data is not None and canvas_result.image_data[:, :, 3].sum() > 0:
+                            if canvas_result.image_data is not None and (canvas_result.image_data[:, :, :3] < 235).any():
                                 sig_confirmed = True
                         except Exception:
                             pass
@@ -667,7 +1145,9 @@ def render_worker_view(branch_name: str) -> None:
                 elif not sig_check:
                     st.warning("안전조치 완료 확인 체크박스에 동의해 주세요.")
                 else:
-                    ptw_id = f"PTW-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    eval_now = now_kst()
+                    ptw_id = f"PTW-{eval_now.strftime('%Y%m%d-%H%M%S')}"
+                    sig_png_bytes = extract_signature_png_bytes(canvas_result, width=380, height=140)
                     hash_payload = json.dumps(
                         {
                             "ptw_id": ptw_id,
@@ -676,6 +1156,7 @@ def render_worker_view(branch_name: str) -> None:
                             "work_type": rec["work_type"],
                             "gps": rec.get("gps_coords", ""),
                             "signers": signers,
+                            "sig_confirmed": sig_confirmed or (sig_png_bytes is not None),
                             "verification": ver,
                         },
                         ensure_ascii=False,
@@ -683,7 +1164,7 @@ def render_worker_view(branch_name: str) -> None:
                     )
                     integrity_hash = hashlib.sha256(hash_payload.encode("utf-8")).hexdigest()
 
-                    with st.spinner("최종 PTW 기록을 중앙 DB에 보존하고 워드 보고서를 생성 중입니다..."):
+                    with st.spinner("최종 PTW 기록을 중앙 DB에 보존하고 현장 위험성 평가표를 생성 중입니다..."):
                         db.complete_ptw_approval(
                             ptw_id=ptw_id,
                             inspection_id=rec["id"],
@@ -712,16 +1193,16 @@ def render_worker_view(branch_name: str) -> None:
                             integrity_hash=integrity_hash,
                             before_marked_img=before_marked,
                             after_img=saved_after,
+                            sig_png_bytes=sig_png_bytes,
+                            eval_dt=eval_now,
                         )
-                    st.success(f"🎉 작업승인(PTW) 발급 완료! 승인번호: **{ptw_id}**")
-                    st.code(f"위변조 방지 해시(SHA-256): {integrity_hash}")
-                    st.download_button(
-                        label="📥 법정 위험성평가표 & PTW 워드문서(.docx) 다운로드",
-                        data=docx_bytes,
-                        file_name=f"{ptw_id}_{branch_name}_{rec['zone_code']}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
-                    )
+                        st.session_state["last_ptw_download"] = {
+                            "ptw_id": ptw_id,
+                            "integrity_hash": integrity_hash,
+                            "docx_bytes": docx_bytes,
+                            "file_name": f"현장_위험성_평가표_{eval_now.strftime('%Y%m%d_%H%M%S')}.docx",
+                        }
+                    st.rerun()
 
 
 # ==========================================
@@ -773,6 +1254,8 @@ def render_admin_view(branch_name: str, branch_info: dict[str, Any]) -> None:
                     f"#{h['id']} [{h['grade']} / {h['final_score']}점] {h['hazard_name']} (AI 원점수: {h['ai_raw_score']}점)",
                     expanded=True,
                 ):
+                    if h.get("current_measure"):
+                        st.write(f"**현재 조치:** {h['current_measure']}")
                     st.write(f"**필수 감소대책:** {h['countermeasure']}")
                     col_ex, col_sc = st.columns([1, 2])
                     excluded = col_ex.checkbox(
