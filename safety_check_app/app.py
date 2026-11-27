@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 import streamlit as st
 
 import db_supabase as db
+from branches import get_hq_list, get_branches_by_hq
 
 try:
     from geopy.geocoders import Nominatim
@@ -1031,7 +1032,7 @@ def build_legal_ptw_docx(
 
 
 # ==========================================
-# 사이드바: QR 지점 자동인식 및 역할별 인증
+# 사이드바: 역할별 인증
 # ==========================================
 def render_sidebar_auth(branches: list[dict[str, Any]]) -> dict[str, Any]:
     st.sidebar.markdown(
@@ -1051,8 +1052,6 @@ def render_sidebar_auth(branches: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
     branch_names = [b["branch_name"] for b in branches]
-    qr_branch = st.query_params.get("branch", "")
-    default_idx = branch_names.index(qr_branch) if qr_branch in branch_names else 0
 
     if mode == "🏢 본사 통합 관제":
         hq_pin = st.sidebar.text_input("본사 마스터 PIN 입력", type="password")
@@ -1067,9 +1066,17 @@ def render_sidebar_auth(branches: list[dict[str, Any]]) -> dict[str, Any]:
         st.sidebar.error("Supabase branches 테이블에 등록된 지점이 없습니다.")
         return {"mode": "NONE", "authenticated": False, "branch_name": None}
 
-    if qr_branch in branch_names:
-        st.sidebar.success(f"QR 지점 자동 인식: **{qr_branch}**")
-    selected_branch = st.sidebar.selectbox("소속 지점 선택", branch_names, index=default_idx)
+    # 1단계: 본부 선택
+    hq_list = get_hq_list()
+    selected_hq = st.sidebar.selectbox("1단계: 소속 본부 선택", hq_list, key="sidebar_hq")
+
+    # 2단계: 선택한 본부 소속이면서 Supabase에도 등록된 지점만 필터링 (오류 방지)
+    hq_branches = [b for b in get_branches_by_hq(selected_hq) if b in branch_names]
+    if not hq_branches:
+        st.sidebar.warning(f"[{selected_hq}]에 등록된 지점이 DB에 없습니다. 전체 목록에서 선택해 주세요.")
+        hq_branches = branch_names
+
+    selected_branch = st.sidebar.selectbox("2단계: 소속 지점 선택", hq_branches, key="sidebar_branch")
     branch_info = next(b for b in branches if b["branch_name"] == selected_branch)
 
     if mode == "👷 현장 작업자 모드":
@@ -1757,7 +1764,7 @@ def main() -> None:
         st.markdown(
             """
             **이용 안내:**
-            * **현장 작업자:** 소속 지점 QR코드를 스캔하거나 지점을 선택한 뒤 지점 공용 PIN을 입력하세요.
+            * **현장 작업자:** 좌측에서 소속 본부와 지점을 차례로 선택한 뒤 지점 공용 PIN을 입력하세요.
             * **지점 안전관리자:** 지점 안전관리자 모드를 선택하고 전용 승인 PIN으로 로그인하세요.
             * **PIN 분실 문의:** 각 지점 안전관리자 또는 본사 안전재난부
             """
